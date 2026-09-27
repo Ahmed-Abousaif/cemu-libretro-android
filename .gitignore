@@ -18,6 +18,8 @@
 
 build/
 build_arm
+build_libretro_android_arm64/
+build_test/
 cmake-build-*/
 out/
 .cache/
@@ -42,6 +44,7 @@ bin/dump/*
 bin/cafeLibs/*
 bin/portable/*
 bin/keys.txt
+src/Cafe/Filesystem/FST/embedded_keys.h
 
 !bin/shaderCache/info.txt
 bin/shaderCache/*

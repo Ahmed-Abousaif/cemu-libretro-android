@@ -48,14 +48,12 @@
       "name": "fmt",
       "version>=": "12.1.0"
     },
-    "hidapi",
     "libpng",
     "glm",
     {
       "name": "glslang",
       "default-features": false
     },
-    "zstd",
     {
       "name": "wxwidgets",
       "platform": "!android"
@@ -81,7 +79,10 @@
         "zip"
       ]
     },
-    "libusb"
+    {
+      "name": "libusb",
+      "platform": "!android"
+    }
   ],
   "overrides": [
     {

@@ -43,7 +43,7 @@ val cemuDataFilesFolder = "../../../bin"
 android {
     namespace = "info.cemu.cemu"
     compileSdk = 36
-    ndkVersion = "29.0.14206865"
+    ndkVersion = "26.1.10909125"
     defaultConfig {
         applicationId = "info.cemu.cemu"
         minSdk = 30
@@ -100,7 +100,7 @@ android {
 
     externalNativeBuild {
         cmake {
-            version = "3.25.0+"
+            version = "3.22.1"
             path = file("../../../CMakeLists.txt")
         }
     }
@@ -121,7 +121,8 @@ android {
                     "-DENABLE_DISCORD_RPC=OFF",
                     "-DENABLE_NSYSHID_LIBUSB=OFF",
                     "-DENABLE_WAYLAND=OFF",
-                    "-DENABLE_HIDAPI=OFF"
+                    "-DENABLE_HIDAPI=OFF",
+                    "-DANDROID_LD=lld"
                 )
                 if (versionMajor != null && versionMinor != null) {
                     arguments.addAll(

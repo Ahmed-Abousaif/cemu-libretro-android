@@ -4,12 +4,17 @@
 #include "config/CemuConfig.h"
 #include "config/ActiveSettings.h"
 #include "config/LaunchSettings.h"
+#include "config/CemuConfig.h"
 
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
 
 #include <fmt/printf.h>
+
+#if BOOST_PLAT_ANDROID
+#include <android/log.h>
+#endif
 
 uint64 s_loggingFlagMask = cemuLog_getFlag(LogType::Force);
 
@@ -202,6 +207,10 @@ bool cemuLog_log(LogType type, std::string_view text)
 {
 	if (!cemuLog_isLoggingEnabled(type))
 		return false;
+
+#if BOOST_PLAT_ANDROID
+	__android_log_print(ANDROID_LOG_INFO, "CemuCafe", "%.*s", (int)text.size(), text.data());
+#endif
 
 	if (LaunchSettings::Verbose())
 		std::cout << text << std::endl;

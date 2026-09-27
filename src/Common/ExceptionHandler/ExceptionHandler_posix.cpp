@@ -155,6 +155,7 @@ void handler_SIGINT(int sig)
 
 void ExceptionHandler_Init()
 {
+#if !BOOST_PLAT_ANDROID
 	struct sigaction action;
 	action.sa_flags = 0;
 	sigfillset(&action.sa_mask); // don't allow signals to be interrupted
@@ -175,4 +176,5 @@ void ExceptionHandler_Init()
 	sigaction(SIGSEGV, &action, nullptr);
 	sigaction(SIGSYS, &action, nullptr);
 	sigaction(SIGTRAP, &action, nullptr);
+#endif
 }

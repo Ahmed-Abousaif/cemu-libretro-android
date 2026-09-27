@@ -1,6 +1,7 @@
 #pragma once
 #include "Cafe/HW/Espresso/EspressoISA.h"
 #include "Cafe/HW/MMU/MMU.h"
+#include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 
 bool GamePatch_IsNonReturnFunction(uint32 hleIndex);
 
@@ -33,6 +34,10 @@ public:
 
 	void trackStartPoint(MPTR startAddress)
 	{
+		if (startAddress < PPC_REC_CODE_AREA_START || startAddress >= PPC_REC_CODE_AREA_END)
+			return;
+		if (!memory_isAddressRangeAccessible(startAddress, 4))
+			return;
 		processRange(startAddress, nullptr, nullptr);
 		processBranchTargets();
 	}
@@ -74,8 +79,21 @@ public:
 	}
 
 private:
+	inline uint32 safe_readU32(MPTR addr)
+	{
+		if (addr < PPC_REC_CODE_AREA_START || addr >= PPC_REC_CODE_AREA_END)
+			return 0;
+		if (!memory_isAddressRangeAccessible(addr, 4))
+			return 0;
+		return memory_readU32(addr);
+	}
+
 	void addBranchDestination(PPCRange_t* sourceRange, MPTR address)
 	{
+		if (address < PPC_REC_CODE_AREA_START || address >= PPC_REC_CODE_AREA_END)
+			return;
+		if (!memory_isAddressRangeAccessible(address, 4))
+			return;
 		map_queuedBranchTargets.emplace(address);
 		map_branchTargetsAll.emplace(address);
 	}
@@ -84,8 +102,12 @@ private:
 	// returns false if the IP cannot increment past the current instruction
 	bool processInstruction(PPCRange_t* range, MPTR address)
 	{
+		if (address < PPC_REC_CODE_AREA_START || address >= PPC_REC_CODE_AREA_END)
+			return false;
+		if (!memory_isAddressRangeAccessible(address, 4))
+			return false;
 		// parse instructions
-		uint32 opcode = memory_readU32(address);
+		uint32 opcode = safe_readU32(address);
 		switch (Espresso::GetPrimaryOpcode(opcode))
 		{
 		case Espresso::PrimaryOpcode::ZERO:
@@ -131,8 +153,8 @@ private:
 				// if the next two or previous two instructions are branch instructions, we assume that they are destinations of a jump table
 				// todo - can we make this more reliable by checking for BCTR or similar instructions first?
 				// example: The Swapper 0x01B1FC04
-				if (PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address + 4)) && PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address + 8)) ||
-					PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address - 8)) && PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address - 4)))
+				if (PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(safe_readU32(address + 4)) && PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(safe_readU32(address + 8)) ||
+					PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(safe_readU32(address - 8)) && PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(safe_readU32(address - 4)))
 				{
 					return true;
 				}
@@ -165,7 +187,7 @@ private:
 
 					// Currently we only end the function if the BCTR is followed by a NOP (alignment) or invalid instruction
 					// todo: improve robustness, find better ways to handle false positives
-					uint32 nextOpcode = memory_readU32(address + 4);
+					uint32 nextOpcode = safe_readU32(address + 4);
 
 					if (nextOpcode == 0x60000000 || PPCRecompilerCalcFuncSize_isValidInstruction(nextOpcode) == false)
 					{
@@ -203,6 +225,11 @@ private:
 	// nextRange must point to the closest range after startAddress, or NULL if there is none
 	void processRange(MPTR startAddress, PPCRange_t* previousRange, PPCRange_t* nextRange)
 	{
+		if (startAddress < PPC_REC_CODE_AREA_START || startAddress >= PPC_REC_CODE_AREA_END)
+			return;
+		if (!memory_isAddressRangeAccessible(startAddress, 4))
+			return;
+
 		checkForCollisions();
 		cemu_assert_debug(previousRange == nullptr || (startAddress == (previousRange->startAddress + previousRange->length)));
 		PPCRange_t* newRange;
@@ -218,11 +245,13 @@ private:
 		}
 		// process instruction flow until it is interrupted by a non-conditional branch
 		MPTR currentAddress = startAddress;
-		MPTR endAddress = 0xFFFFFFFF;
-		if (nextRange)
+		MPTR endAddress = PPC_REC_CODE_AREA_END;
+		if (nextRange && nextRange->startAddress < endAddress)
 			endAddress = nextRange->startAddress;
 		while (currentAddress < endAddress)
 		{
+			if (!memory_isAddressRangeAccessible(currentAddress, 4))
+				break;
 			if (!processInstruction(newRange, currentAddress))
 			{
 				currentAddress += 4;
@@ -254,6 +283,12 @@ private:
 		PPCRange_t* previousRange = nullptr;
 		for (std::set<uint32_t>::const_iterator targetItr = map_queuedBranchTargets.begin() ; targetItr != map_queuedBranchTargets.end(); )
 		{
+			if (*targetItr < PPC_REC_CODE_AREA_START || *targetItr >= PPC_REC_CODE_AREA_END || !memory_isAddressRangeAccessible(*targetItr, 4))
+			{
+				targetItr = map_queuedBranchTargets.erase(targetItr);
+				continue;
+			}
+
 			while (rangeItr != map_ranges.end() && ((*rangeItr)->startAddress + (*rangeItr)->length) <= (*targetItr))
 			{
 				previousRange = *rangeItr;
@@ -325,4 +360,4 @@ private:
 	std::set<PPCRange_t*, RangePtrCmp> map_ranges;
 	std::set<uint32> map_queuedBranchTargets;
 	std::set<uint32> map_branchTargetsAll;
-};
+};

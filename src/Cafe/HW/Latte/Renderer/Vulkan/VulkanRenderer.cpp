@@ -25,6 +25,7 @@
 #include "imgui/imgui_impl_vulkan.h"
 
 #include "Cafe/TitleList/GameInfo.h"
+#include "libretro/LibretroVulkan.h"
 
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
@@ -37,6 +38,35 @@
 #endif
 
 extern std::atomic_int g_compiling_pipelines;
+
+namespace
+{
+// LibretroDroid submits and presents on this same queue from the render thread.
+// The Vulkan spec requires external synchronization, and the frontend exposes it
+// as lock_queue / unlock_queue.
+struct LibretroQueueLock
+{
+	void* handle = nullptr;
+	retro_vulkan_unlock_queue_t unlock = nullptr;
+
+	LibretroQueueLock()
+	{
+		const auto* iface = Libretro::vulkan_iface;
+		if (iface && iface->lock_queue && iface->unlock_queue)
+		{
+			handle = iface->handle;
+			unlock = iface->unlock_queue;
+			iface->lock_queue(handle);
+		}
+	}
+
+	~LibretroQueueLock()
+	{
+		if (unlock)
+			unlock(handle);
+	}
+};
+}
 
 const  std::vector<const char*> kOptionalDeviceExtensions =
 {
@@ -481,258 +511,257 @@ VulkanRenderer::VulkanRenderer()
 
 	cemuLog_log(LogType::Force, "------- Init Vulkan graphics backend -------");
 
-	const bool useValidationLayer = cemuLog_isLoggingEnabled(LogType::VulkanValidation);
-	if (useValidationLayer)
-		cemuLog_log(LogType::Force, "Validation layer is enabled");
-
-	VkResult err;
-
-	// build list of layers
-	m_layerNames.clear();
-	if (useValidationLayer)
-		m_layerNames.emplace_back("VK_LAYER_KHRONOS_validation");
-
-	// check available instance extensions
-	std::vector<const char*> enabledInstanceExtensions = CheckInstanceExtensionSupport(m_featureControl);
-
-	uint32 apiVersion = VK_API_VERSION_1_1;
-	if (vkEnumerateInstanceVersion(&apiVersion) != VK_SUCCESS)
+	if (Libretro::vulkan_iface && Libretro::vulkan_iface->instance && Libretro::vulkan_iface->device)
 	{
-		if (VK_API_VERSION_MAJOR(apiVersion) < 1 || VK_API_VERSION_MINOR(apiVersion) < 2)
-			apiVersion = VK_API_VERSION_1_1;
-	}
+		cemuLog_log(LogType::Force, "VulkanRenderer: using shared Vulkan context from Libretro frontend (instance={}, gpu={}, device={}, queue={}, queueFamily={})",
+			(void*)Libretro::vulkan_iface->instance, (void*)Libretro::vulkan_iface->gpu, (void*)Libretro::vulkan_iface->device, (void*)Libretro::vulkan_iface->queue, Libretro::vulkan_iface->queue_index);
+		m_externalDevice = true;
+		m_instance = Libretro::vulkan_iface->instance;
+		m_physicalDevice = Libretro::vulkan_iface->gpu;
+		m_logicalDevice = Libretro::vulkan_iface->device;
+		m_graphicsQueue = Libretro::vulkan_iface->queue;
+		m_presentQueue = Libretro::vulkan_iface->queue;
+		m_indices.graphicsFamily = (int32_t)Libretro::vulkan_iface->queue_index;
+		m_indices.presentFamily = (int32_t)Libretro::vulkan_iface->queue_index;
 
-	cemuLog_log(LogType::Force, fmt::format("Vulkan instance version: {}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion)));
-
-	VkApplicationInfo app_info{};
-	app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-	app_info.pApplicationName = EMULATOR_NAME;
-	app_info.applicationVersion = VK_MAKE_VERSION(EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_PATCH);
-	app_info.pEngineName = EMULATOR_NAME;
-	app_info.engineVersion = app_info.applicationVersion;
-	app_info.apiVersion = apiVersion;
-
-	VkInstanceCreateInfo create_info{};
-	create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-	create_info.pApplicationInfo = &app_info;
-	create_info.ppEnabledExtensionNames = enabledInstanceExtensions.data();
-	create_info.enabledExtensionCount = enabledInstanceExtensions.size();
-	create_info.ppEnabledLayerNames = m_layerNames.data();
-	create_info.enabledLayerCount = m_layerNames.size();
-
-	err = vkCreateInstance(&create_info, nullptr, &m_instance);
-
-	if (err == VK_ERROR_LAYER_NOT_PRESENT) {
-		cemuLog_log(LogType::Force, "Failed to enable vulkan validation (VK_LAYER_KHRONOS_validation)");
-		create_info.enabledLayerCount = 0;
-		err = vkCreateInstance(&create_info, nullptr, &m_instance);
-	}
-
-	if (err != VK_SUCCESS)
-		throw std::runtime_error(fmt::format("Unable to create a Vulkan instance: {}", err));
-
-	if (!InitializeInstanceVulkan(m_instance))
-		throw std::runtime_error("Unable to load instanced Vulkan functions");
-
-	// Workaround for BOTW + RADV. Runes like Magnesis and the camera cause GPU crashes.
-#if BOOST_OS_LINUX
-	uint64 currentTitleId = CafeSystem::GetForegroundTitleId();
-	if (currentTitleId == 0x00050000101c9500 || currentTitleId == 0x00050000101c9400 || currentTitleId == 0x00050000101c9300)
-	{
-		LinuxBreathOfTheWildWorkaround(m_instance, &create_info);
-	}
-#endif
-
-	uint32_t device_count = 0;
-	vkEnumeratePhysicalDevices(m_instance, &device_count, nullptr);
-	if (device_count == 0)
-		throw std::runtime_error("Failed to find a GPU with Vulkan support.");
-
-	// create tmp surface to create a logical device
-	auto surface = CreateFramebufferSurface(m_instance, WindowSystem::GetWindowInfo().window_main);
-
-	auto& config = GetConfig();
-	decltype(config.vk_graphic_device_uuid) zero{};
-	const bool has_device_set = config.vk_graphic_device_uuid != zero;
-
-	VkPhysicalDevice fallbackDevice = VK_NULL_HANDLE;
-
-	std::vector<VkPhysicalDevice> devices(device_count);
-	vkEnumeratePhysicalDevices(m_instance, &device_count, devices.data());
-	for (const auto& device : devices)
-	{
-		if (IsDeviceSuitable(surface, device))
-		{
-			if (fallbackDevice == VK_NULL_HANDLE)
-				fallbackDevice = device;
-
-			if (has_device_set)
-			{
-				VkPhysicalDeviceIDProperties physDeviceIDProps = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
-				VkPhysicalDeviceProperties2 physDeviceProps = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
-				physDeviceProps.pNext = &physDeviceIDProps;
-				vkGetPhysicalDeviceProperties2(device, &physDeviceProps);
-
-				if (memcmp(config.vk_graphic_device_uuid.data(), physDeviceIDProps.deviceUUID, VK_UUID_SIZE) != 0)
-					continue;
-			}
-
-			m_physicalDevice = device;
-			break;
-		}
-	}
-
-	if (m_physicalDevice == VK_NULL_HANDLE && fallbackDevice != VK_NULL_HANDLE)
-	{
-		cemuLog_log(LogType::Force, "The selected GPU could not be found or is not suitable. Falling back to first available device instead");
-		m_physicalDevice = fallbackDevice;
-		config.vk_graphic_device_uuid = {}; // resetting device selection
-	}
-	else if (m_physicalDevice == VK_NULL_HANDLE)
-	{
-		cemuLog_log(LogType::Force, "No physical GPU could be found with the required extensions and swap chain support.");
-		throw std::runtime_error("No physical GPU could be found with the required extensions and swap chain support.");
-	}
-
-	CheckDeviceExtensionSupport(m_physicalDevice, m_featureControl); // todo - merge this with GetDeviceFeatures and separate from IsDeviceSuitable?
-
-	DetermineVendor();
-	GetDeviceFeatures();
-
-	// init memory manager
-	memoryManager.reset(new VKRMemoryManager(this));
-
-	try
-	{
-		VkPhysicalDeviceIDProperties physDeviceIDProps = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
-		VkPhysicalDeviceProperties2 physDeviceProps = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
-		physDeviceProps.pNext = &physDeviceIDProps;
-		vkGetPhysicalDeviceProperties2(m_physicalDevice, &physDeviceProps);
-
-		#if BOOST_OS_WINDOWS
-		m_dxgi_wrapper = std::make_unique<DXGIWrapper>(physDeviceIDProps.deviceLUID);
-		#endif
-	}
-	catch (const std::exception& ex)
-	{
-		cemuLog_log(LogType::Force, "can't create dxgi wrapper: {}", ex.what());
-	}
-
-	// create logical device
-	m_indices = FindQueueFamilies(surface, m_physicalDevice);
-	std::set<int> uniqueQueueFamilies = { m_indices.graphicsFamily, m_indices.presentFamily };
-	std::vector<VkDeviceQueueCreateInfo> queueCreateInfos = CreateQueueCreateInfos(uniqueQueueFamilies);
-	VkPhysicalDeviceFeatures deviceFeatures = {};
-	VkPhysicalDeviceFeatures2 deviceFeatures2 = {};
-	deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-	vkGetPhysicalDeviceFeatures2(m_physicalDevice, &deviceFeatures2);
-
-	deviceFeatures.independentBlend = VK_TRUE;
-	deviceFeatures.samplerAnisotropy = m_featureControl.deviceFeatures.sampler_anisotropy;
-	deviceFeatures.imageCubeArray = VK_TRUE;
-	deviceFeatures.geometryShader = m_featureControl.deviceFeatures.geometry_shader;
-	deviceFeatures.logicOp = m_featureControl.deviceFeatures.logic_op;
-	deviceFeatures.occlusionQueryPrecise = m_featureControl.deviceFeatures.occlusion_query_precise;
-	deviceFeatures.depthClamp = m_featureControl.deviceFeatures.depth_clamp;
-	deviceFeatures.depthBiasClamp = VK_TRUE;
-
-	if (m_featureControl.deviceExtensions.pipeline_robustness)
-	{
-		deviceFeatures.robustBufferAccess = VK_FALSE;
+		InitializeGlobalVulkan();
+		InitializeInstanceVulkan(m_instance);
+		InitializeDeviceVulkan(m_logicalDevice);
 	}
 	else
 	{
-		cemuLog_log(LogType::Force, "VK_EXT_pipeline_robustness not supported. Falling back to robustBufferAccess");
-		deviceFeatures.robustBufferAccess = VK_TRUE;
+		const bool useValidationLayer = cemuLog_isLoggingEnabled(LogType::VulkanValidation);
+		if (useValidationLayer)
+			cemuLog_log(LogType::Force, "Validation layer is enabled");
+
+		VkResult err;
+
+		// build list of layers
+		m_layerNames.clear();
+		if (useValidationLayer)
+			m_layerNames.emplace_back("VK_LAYER_KHRONOS_validation");
+
+		// check available instance extensions
+		std::vector<const char*> enabledInstanceExtensions = CheckInstanceExtensionSupport(m_featureControl);
+
+		uint32 apiVersion = VK_API_VERSION_1_1;
+		if (vkEnumerateInstanceVersion(&apiVersion) != VK_SUCCESS)
+		{
+			if (VK_API_VERSION_MAJOR(apiVersion) < 1 || VK_API_VERSION_MINOR(apiVersion) < 2)
+				apiVersion = VK_API_VERSION_1_1;
+		}
+
+		cemuLog_log(LogType::Force, fmt::format("Vulkan instance version: {}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion)));
+
+		VkApplicationInfo app_info{};
+		app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+		app_info.pApplicationName = EMULATOR_NAME;
+		app_info.applicationVersion = VK_MAKE_VERSION(EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_PATCH);
+		app_info.pEngineName = EMULATOR_NAME;
+		app_info.engineVersion = app_info.applicationVersion;
+		app_info.apiVersion = apiVersion;
+
+		VkInstanceCreateInfo create_info{};
+		create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+		create_info.pApplicationInfo = &app_info;
+		create_info.ppEnabledExtensionNames = enabledInstanceExtensions.data();
+		create_info.enabledExtensionCount = enabledInstanceExtensions.size();
+		create_info.ppEnabledLayerNames = m_layerNames.data();
+		create_info.enabledLayerCount = m_layerNames.size();
+
+		err = vkCreateInstance(&create_info, nullptr, &m_instance);
+
+		if (err == VK_ERROR_LAYER_NOT_PRESENT) {
+			cemuLog_log(LogType::Force, "Failed to enable vulkan validation (VK_LAYER_KHRONOS_validation)");
+			create_info.enabledLayerCount = 0;
+			err = vkCreateInstance(&create_info, nullptr, &m_instance);
+		}
+
+		if (err != VK_SUCCESS)
+			throw std::runtime_error(fmt::format("Unable to create a Vulkan instance: {}", err));
+
+		if (!InitializeInstanceVulkan(m_instance))
+			throw std::runtime_error("Unable to load instanced Vulkan functions");
+
+		// Workaround for BOTW + RADV. Runes like Magnesis and the camera cause GPU crashes.
+	#if BOOST_OS_LINUX
+		uint64 currentTitleId = CafeSystem::GetForegroundTitleId();
+		if (currentTitleId == 0x00050000101c9500 || currentTitleId == 0x00050000101c9400 || currentTitleId == 0x00050000101c9300)
+		{
+			LinuxBreathOfTheWildWorkaround(m_instance, &create_info);
+		}
+	#endif
+
+		uint32_t device_count = 0;
+		vkEnumeratePhysicalDevices(m_instance, &device_count, nullptr);
+		if (device_count == 0)
+			throw std::runtime_error("Failed to find a GPU with Vulkan support.");
+
+		// create tmp surface to create a logical device
+		auto surface = CreateFramebufferSurface(m_instance, WindowSystem::GetWindowInfo().window_main);
+
+		auto& config = GetConfig();
+		decltype(config.vk_graphic_device_uuid) zero{};
+		const bool has_device_set = config.vk_graphic_device_uuid != zero;
+
+		VkPhysicalDevice fallbackDevice = VK_NULL_HANDLE;
+
+		std::vector<VkPhysicalDevice> devices(device_count);
+		vkEnumeratePhysicalDevices(m_instance, &device_count, devices.data());
+		for (const auto& device : devices)
+		{
+			if (IsDeviceSuitable(surface, device))
+			{
+				if (fallbackDevice == VK_NULL_HANDLE)
+					fallbackDevice = device;
+
+				if (has_device_set)
+				{
+					VkPhysicalDeviceIDProperties physDeviceIDProps = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
+					VkPhysicalDeviceProperties2 physDeviceProps = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+					physDeviceProps.pNext = &physDeviceIDProps;
+					vkGetPhysicalDeviceProperties2(device, &physDeviceProps);
+
+					if (memcmp(config.vk_graphic_device_uuid.data(), physDeviceIDProps.deviceUUID, VK_UUID_SIZE) != 0)
+						continue;
+				}
+
+				m_physicalDevice = device;
+				break;
+			}
+		}
+
+		if (m_physicalDevice == VK_NULL_HANDLE && fallbackDevice != VK_NULL_HANDLE)
+		{
+			cemuLog_log(LogType::Force, "The selected GPU could not be found or is not suitable. Falling back to first available device instead");
+			m_physicalDevice = fallbackDevice;
+			config.vk_graphic_device_uuid = {}; // resetting device selection
+		}
+		else if (m_physicalDevice == VK_NULL_HANDLE)
+		{
+			cemuLog_log(LogType::Force, "No physical GPU could be found with the required extensions and swap chain support.");
+			throw std::runtime_error("No physical GPU could be found with the required extensions and swap chain support.");
+		}
+
+		// create logical device
+		m_indices = FindQueueFamilies(surface, m_physicalDevice);
+		std::set<int> uniqueQueueFamilies = { m_indices.graphicsFamily, m_indices.presentFamily };
+		std::vector<VkDeviceQueueCreateInfo> queueCreateInfos = CreateQueueCreateInfos(uniqueQueueFamilies);
+		VkPhysicalDeviceFeatures deviceFeatures = {};
+		VkPhysicalDeviceFeatures2 deviceFeatures2 = {};
+		deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		vkGetPhysicalDeviceFeatures2(m_physicalDevice, &deviceFeatures2);
+
+		deviceFeatures.independentBlend = VK_TRUE;
+		deviceFeatures.samplerAnisotropy = m_featureControl.deviceFeatures.sampler_anisotropy;
+		deviceFeatures.imageCubeArray = VK_TRUE;
+		deviceFeatures.geometryShader = m_featureControl.deviceFeatures.geometry_shader;
+		deviceFeatures.logicOp = m_featureControl.deviceFeatures.logic_op;
+		deviceFeatures.occlusionQueryPrecise = m_featureControl.deviceFeatures.occlusion_query_precise;
+		deviceFeatures.depthClamp = m_featureControl.deviceFeatures.depth_clamp;
+		deviceFeatures.depthBiasClamp = VK_TRUE;
+
+		if (m_featureControl.deviceExtensions.pipeline_robustness)
+		{
+			deviceFeatures.robustBufferAccess = VK_FALSE;
+		}
+		else
+		{
+			cemuLog_log(LogType::Force, "VK_EXT_pipeline_robustness not supported. Falling back to robustBufferAccess");
+			deviceFeatures.robustBufferAccess = VK_TRUE;
+		}
+
+		if (m_featureControl.mode.useTFEmulationViaSSBO)
+		{
+			m_featureControl.mode.useTFEmulationViaSSBO = deviceFeatures.vertexPipelineStoresAndAtomics = m_featureControl.deviceFeatures.vertex_pipeline_stores_and_atomics;
+		}
+
+		void* deviceExtensionFeatures = nullptr;
+
+		// enable VK_EXT_pipeline_creation_cache_control
+		VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cacheControlFeature{};
+		if (m_featureControl.deviceExtensions.pipeline_creation_cache_control)
+		{
+			cacheControlFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT;
+			cacheControlFeature.pNext = deviceExtensionFeatures;
+			deviceExtensionFeatures = &cacheControlFeature;
+			cacheControlFeature.pipelineCreationCacheControl = VK_TRUE;
+		}
+		// enable VK_EXT_custom_border_color
+		VkPhysicalDeviceCustomBorderColorFeaturesEXT customBorderColorFeature{};
+		if (m_featureControl.deviceExtensions.custom_border_color_without_format)
+		{
+			customBorderColorFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT;
+			customBorderColorFeature.pNext = deviceExtensionFeatures;
+			deviceExtensionFeatures = &customBorderColorFeature;
+			customBorderColorFeature.customBorderColors = VK_TRUE;
+			customBorderColorFeature.customBorderColorWithoutFormat = VK_TRUE;
+		}
+		// enable VK_KHR_present_id
+		VkPhysicalDevicePresentIdFeaturesKHR presentIdFeature{};
+		if(m_featureControl.deviceExtensions.present_wait)
+		{
+			presentIdFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+			presentIdFeature.pNext = deviceExtensionFeatures;
+			deviceExtensionFeatures = &presentIdFeature;
+			presentIdFeature.presentId = VK_TRUE;
+		}
+		// enable VK_KHR_present_wait
+		VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeature{};
+		if(m_featureControl.deviceExtensions.present_wait)
+		{
+			presentWaitFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+			presentWaitFeature.pNext = deviceExtensionFeatures;
+			deviceExtensionFeatures = &presentWaitFeature;
+			presentWaitFeature.presentWait = VK_TRUE;
+		}
+		// enable VK_EXT_pipeline_robustness
+		VkPhysicalDevicePipelineRobustnessFeaturesEXT pipelineRobustnessFeature{};
+		if (m_featureControl.deviceExtensions.pipeline_robustness)
+		{
+			pipelineRobustnessFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT;
+			pipelineRobustnessFeature.pNext = deviceExtensionFeatures;
+			deviceExtensionFeatures = &pipelineRobustnessFeature;
+			pipelineRobustnessFeature.pipelineRobustness = VK_TRUE;
+		}
+
+		std::vector<const char*> used_extensions;
+		VkDeviceCreateInfo createInfo = CreateDeviceCreateInfo(queueCreateInfos, deviceFeatures, deviceExtensionFeatures, used_extensions);
+
+		VkResult result = vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_logicalDevice);
+		if (result != VK_SUCCESS)
+		{
+			cemuLog_log(LogType::Force, "Vulkan: Unable to create a logical device. Error {}", (sint32)result);
+			throw std::runtime_error(fmt::format("Unable to create a logical device: {}", result));
+		}
+
+		InitializeDeviceVulkan(m_logicalDevice);
+
+		vkGetDeviceQueue(m_logicalDevice, m_indices.graphicsFamily, 0, &m_graphicsQueue);
+		vkGetDeviceQueue(m_logicalDevice, m_indices.graphicsFamily, 0, &m_presentQueue);
+
+		if (surface != VK_NULL_HANDLE)
+			vkDestroySurfaceKHR(m_instance, surface, nullptr);
+
+		if (useValidationLayer && m_featureControl.instanceExtensions.debug_utils)
+		{
+			PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT"));
+
+			VkDebugUtilsMessengerCreateInfoEXT debugCallback{};
+			debugCallback.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+			debugCallback.pNext = nullptr;
+			debugCallback.flags = 0;
+			debugCallback.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
+			debugCallback.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+			debugCallback.pfnUserCallback = &DebugUtilsCallback;
+
+			vkCreateDebugUtilsMessengerEXT(m_instance, &debugCallback, nullptr, &m_debugCallback);
+
+			cemuLog_log(LogType::Force, "Debug: Vulkan validation layer enabled, vkCreateDebugUtilsMessengerEXT will be used to log validation errors");
+		}
 	}
 
-	if (m_featureControl.mode.useTFEmulationViaSSBO)
-	{
-		m_featureControl.mode.useTFEmulationViaSSBO = deviceFeatures.vertexPipelineStoresAndAtomics = m_featureControl.deviceFeatures.vertex_pipeline_stores_and_atomics;
-	}
-
-	void* deviceExtensionFeatures = nullptr;
-
-	// enable VK_EXT_pipeline_creation_cache_control
-	VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cacheControlFeature{};
-	if (m_featureControl.deviceExtensions.pipeline_creation_cache_control)
-	{
-		cacheControlFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT;
-		cacheControlFeature.pNext = deviceExtensionFeatures;
-		deviceExtensionFeatures = &cacheControlFeature;
-		cacheControlFeature.pipelineCreationCacheControl = VK_TRUE;
-	}
-	// enable VK_EXT_custom_border_color
-	VkPhysicalDeviceCustomBorderColorFeaturesEXT customBorderColorFeature{};
-	if (m_featureControl.deviceExtensions.custom_border_color_without_format)
-	{
-		customBorderColorFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT;
-		customBorderColorFeature.pNext = deviceExtensionFeatures;
-		deviceExtensionFeatures = &customBorderColorFeature;
-		customBorderColorFeature.customBorderColors = VK_TRUE;
-		customBorderColorFeature.customBorderColorWithoutFormat = VK_TRUE;
-	}
-	// enable VK_KHR_present_id
-	VkPhysicalDevicePresentIdFeaturesKHR presentIdFeature{};
-	if(m_featureControl.deviceExtensions.present_wait)
-	{
-		presentIdFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
-		presentIdFeature.pNext = deviceExtensionFeatures;
-		deviceExtensionFeatures = &presentIdFeature;
-		presentIdFeature.presentId = VK_TRUE;
-	}
-	// enable VK_KHR_present_wait
-	VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeature{};
-	if(m_featureControl.deviceExtensions.present_wait)
-	{
-		presentWaitFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
-		presentWaitFeature.pNext = deviceExtensionFeatures;
-		deviceExtensionFeatures = &presentWaitFeature;
-		presentWaitFeature.presentWait = VK_TRUE;
-	}
-	// enable VK_EXT_pipeline_robustness
-	VkPhysicalDevicePipelineRobustnessFeaturesEXT pipelineRobustnessFeature{};
-	if (m_featureControl.deviceExtensions.pipeline_robustness)
-	{
-		pipelineRobustnessFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT;
-		pipelineRobustnessFeature.pNext = deviceExtensionFeatures;
-		deviceExtensionFeatures = &pipelineRobustnessFeature;
-		pipelineRobustnessFeature.pipelineRobustness = VK_TRUE;
-	}
-
-	std::vector<const char*> used_extensions;
-	VkDeviceCreateInfo createInfo = CreateDeviceCreateInfo(queueCreateInfos, deviceFeatures, deviceExtensionFeatures, used_extensions);
-
-	VkResult result = vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_logicalDevice);
-	if (result != VK_SUCCESS)
-	{
-		cemuLog_log(LogType::Force, "Vulkan: Unable to create a logical device. Error {}", (sint32)result);
-		throw std::runtime_error(fmt::format("Unable to create a logical device: {}", result));
-	}
-
-	InitializeDeviceVulkan(m_logicalDevice);
-
-	vkGetDeviceQueue(m_logicalDevice, m_indices.graphicsFamily, 0, &m_graphicsQueue);
-	vkGetDeviceQueue(m_logicalDevice, m_indices.graphicsFamily, 0, &m_presentQueue);
-
-	vkDestroySurfaceKHR(m_instance, surface, nullptr);
-
-	if (useValidationLayer && m_featureControl.instanceExtensions.debug_utils)
-	{
-		PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT"));
-
-		VkDebugUtilsMessengerCreateInfoEXT debugCallback{};
-		debugCallback.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-		debugCallback.pNext = nullptr;
-		debugCallback.flags = 0;
-		debugCallback.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
-		debugCallback.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-		debugCallback.pfnUserCallback = &DebugUtilsCallback;
-
-		vkCreateDebugUtilsMessengerEXT(m_instance, &debugCallback, nullptr, &m_debugCallback);
-
-		cemuLog_log(LogType::Force, "Debug: Vulkan validation layer enabled, vkCreateDebugUtilsMessengerEXT will be used to log validation errors");
-	}
+	memoryManager.reset(new VKRMemoryManager(this));
 
 	if (this->IsTracingToolEnabled())
 		cemuLog_log(LogType::Force, "Debug: Tracing tool detected, will recompile all shaders with debug info enabled. This disables the SPIR-V cache.");
@@ -890,7 +919,7 @@ VulkanRenderer::~VulkanRenderer()
 	VKRObjectSampler::DestroyCache();
 
 	// destroy debug callback
-	if (m_debugCallback)
+	if (!m_externalDevice && m_debugCallback)
 	{
 		PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT"));
 		vkDestroyDebugUtilsMessengerEXT(m_instance, m_debugCallback, nullptr);
@@ -903,7 +932,7 @@ VulkanRenderer::~VulkanRenderer()
 	memoryManager.reset();
 
 	// destroy instance, devices
-	if (m_instance != VK_NULL_HANDLE)
+	if (!m_externalDevice && m_instance != VK_NULL_HANDLE)
 	{
 		if (m_logicalDevice != VK_NULL_HANDLE)
 		{
@@ -1329,9 +1358,17 @@ VulkanRenderer::QueueFamilyIndices VulkanRenderer::FindQueueFamilies(VkSurfaceKH
 			indices.graphicsFamily = i;
 
 		VkBool32 presentSupport = false;
-		const VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
-		if (result != VK_SUCCESS)
-			throw std::runtime_error(fmt::format("Error while attempting to check if a surface supports presentation: {}", result));
+		if (surface != VK_NULL_HANDLE)
+		{
+			const VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+			if (result != VK_SUCCESS)
+				throw std::runtime_error(fmt::format("Error while attempting to check if a surface supports presentation: {}", result));
+		}
+		else
+		{
+			if (queueFamily.queueCount > 0 && (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT))
+				presentSupport = true;
+		}
 
 		if (queueFamily.queueCount > 0 && presentSupport)
 			indices.presentFamily = i;
@@ -1508,9 +1545,13 @@ bool VulkanRenderer::IsDeviceSuitable(VkSurfaceKHR surface, const VkPhysicalDevi
 	if (!CheckDeviceExtensionSupport(device, info))
 		return false;
 
-	const auto swapchainSupport = SwapchainInfoVk::QuerySwapchainSupport(surface, device);
+	if (surface != VK_NULL_HANDLE)
+	{
+		const auto swapchainSupport = SwapchainInfoVk::QuerySwapchainSupport(surface, device);
+		return !swapchainSupport.formats.empty() && !swapchainSupport.presentModes.empty();
+	}
 
-	return !swapchainSupport.formats.empty() && !swapchainSupport.presentModes.empty();
+	return true;
 }
 
 #if BOOST_OS_WINDOWS
@@ -1536,20 +1577,23 @@ VkSurfaceKHR VulkanRenderer::CreateWinSurface(VkInstance instance, HWND hwindow)
 #if BOOST_PLAT_ANDROID
 VkSurfaceKHR VulkanRenderer::CreateAndroidSurface(VkInstance instance, ANativeWindow* window)
 {
-    VkAndroidSurfaceCreateInfoKHR sci{};
-    sci.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
-    sci.flags = 0;
-    sci.window = window;
+	if (!window)
+		return VK_NULL_HANDLE;
 
-    VkSurfaceKHR result;
-    VkResult err;
-    if ((err = vkCreateAndroidSurfaceKHR(instance, &sci, nullptr, &result)) != VK_SUCCESS)
-    {
+	VkAndroidSurfaceCreateInfoKHR sci{};
+	sci.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+	sci.flags = 0;
+	sci.window = window;
+
+	VkSurfaceKHR result = VK_NULL_HANDLE;
+	VkResult err;
+	if ((err = vkCreateAndroidSurfaceKHR(instance, &sci, nullptr, &result)) != VK_SUCCESS)
+	{
 		cemuLog_log(LogType::Force, "Cannot create an Android Vulkan surface: {}", (sint32)err);
-        throw std::runtime_error(fmt::format("Cannot create an Android Vulkan surface: {}", err));
-    }
+		return VK_NULL_HANDLE;
+	}
 
-    return result;
+	return result;
 }
 #elif BOOST_OS_LINUX || BOOST_OS_BSD
 VkSurfaceKHR VulkanRenderer::CreateXlibSurface(VkInstance instance, Display* dpy, Window window)
@@ -1772,19 +1816,24 @@ void VulkanRenderer::CreateNullTexture(NullTexture& nullTex, VkImageType imageTy
 
 void VulkanRenderer::CreateNullObjects()
 {
+	if (m_logicalDevice == VK_NULL_HANDLE)
+		return;
 	CreateNullTexture(nullTexture1D, VK_IMAGE_TYPE_1D);
 	CreateNullTexture(nullTexture2D, VK_IMAGE_TYPE_2D);
 }
 
 void VulkanRenderer::DeleteNullTexture(NullTexture& nullTex)
 {
+	if (m_logicalDevice == VK_NULL_HANDLE)
+		return;
 	vkDestroySampler(m_logicalDevice, nullTex.sampler, nullptr);
 	nullTex.sampler = VK_NULL_HANDLE;
 	vkDestroyImageView(m_logicalDevice, nullTex.view, nullptr);
 	nullTex.view = VK_NULL_HANDLE;
 	vkDestroyImage(m_logicalDevice, nullTex.image, nullptr);
 	nullTex.image = VK_NULL_HANDLE;
-	memoryManager->imageMemoryFree(nullTex.allocation);
+	if (memoryManager)
+		memoryManager->imageMemoryFree(nullTex.allocation);
 	nullTex.allocation = nullptr;
 }
 
@@ -1794,19 +1843,82 @@ void VulkanRenderer::DeleteNullObjects()
 	DeleteNullTexture(nullTexture2D);
 }
 
+void VulkanRenderer::SetLibretroVulkanContext(VkInstance instance, VkPhysicalDevice physDevice,
+	                                           VkDevice device, VkQueue queue, uint32_t queueFamily)
+{
+	m_instance = instance;
+	m_physicalDevice = physDevice;
+	m_logicalDevice = device;
+	m_presentQueue = queue;
+	m_graphicsQueue = queue;
+	m_indices.presentFamily = (int32_t)queueFamily;
+	m_indices.graphicsFamily = (int32_t)queueFamily;
+	m_externalDevice = true;
+
+	// Ensure descriptor pool and pipeline cache are created with the real device,
+	// since the constructor may have run before the libretro context was ready.
+	InitializeDeviceVulkan(device);
+
+	if (m_descriptorPool == VK_NULL_HANDLE)
+		CreateDescriptorPool();
+	// CreateNullTexture records a pipeline barrier, so a command buffer has to
+	// be recording before the placeholder textures are created.
+	if (m_commandPool == VK_NULL_HANDLE)
+	{
+		CreateCommandPool();
+		CreateCommandBuffers();
+	}
+	if (m_state.currentCommandBuffer == VK_NULL_HANDLE)
+		InitFirstCommandBuffer();
+	if (m_pipeline_cache == nullptr)
+		CreatePipelineCache();
+	if (nullTexture1D.image == VK_NULL_HANDLE)
+		CreateNullObjects();
+}
+
 void VulkanRenderer::ImguiInit()
 {
+	// In the libretro path there is no swapchain, but we still need to initialise
+	// ImGui so that GenerateTexture (used by LatteShaderCache_Load) works.  We
+	// detect this by checking whether the device is valid while no swapchain exists.
+	const bool hasSwapchain = m_mainSwapchainInfo && m_mainSwapchainInfo->IsValid();
+	const bool hasDevice    = m_logicalDevice != VK_NULL_HANDLE;
+
+	if (!hasSwapchain && !hasDevice)
+		return;
+
+	// Descriptor pool and pipeline cache may not be ready yet in the libretro path;
+	// skip ImGui init if they're not available.
+	if (m_descriptorPool == VK_NULL_HANDLE || m_pipeline_cache == nullptr)
+		return;
+
+	// Ensure we have a valid ImGui context before calling ImGui_ImplVulkan_Init
+	if (ImGui::GetCurrentContext() == nullptr)
+	{
+		if (imguiTVContext)
+			ImGui::SetCurrentContext(imguiTVContext);
+		else
+			return; // ImGui context not yet created by Renderer::Initialize()
+	}
+
 	VkRenderPass prevRenderPass = m_imguiRenderPass;
 
+	VkFormat attachmentFormat = hasSwapchain
+		? m_mainSwapchainInfo->m_surfaceFormat.format
+		: VK_FORMAT_R8G8B8A8_UNORM; // libretro path: we render to R8G8B8A8 images
+	uint32_t imageCount = hasSwapchain
+		? (uint32_t)m_mainSwapchainInfo->m_swapchainImages.size()
+		: 2u;
+
 	VkAttachmentDescription colorAttachment = {};
-	colorAttachment.format = m_mainSwapchainInfo->m_surfaceFormat.format;
+	colorAttachment.format = attachmentFormat;
 	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	colorAttachment.initialLayout = hasSwapchain ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_GENERAL;
+	colorAttachment.finalLayout   = hasSwapchain ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_GENERAL;
 
 	VkAttachmentReference colorAttachmentRef = {};
 	colorAttachmentRef.attachment = 0;
@@ -1834,8 +1946,8 @@ void VulkanRenderer::ImguiInit()
 	info.Queue = m_presentQueue;
 	info.PipelineCache = m_pipeline_cache;
 	info.DescriptorPool = m_descriptorPool;
-	info.MinImageCount = m_mainSwapchainInfo->m_swapchainImages.size();
-	info.ImageCount = info.MinImageCount;
+	info.MinImageCount = imageCount;
+	info.ImageCount = imageCount;
 
 	ImGui_ImplVulkan_Init(&info, m_imguiRenderPass);
 
@@ -1846,10 +1958,14 @@ void VulkanRenderer::ImguiInit()
 void VulkanRenderer::Initialize()
 {
 	Renderer::Initialize();
-	InitFirstCommandBuffer();
+	// Libretro context reset already begins a command buffer and creates the
+	// pipeline cache. Starting either a second time aborts.
+	if (m_state.currentCommandBuffer == VK_NULL_HANDLE)
+		InitFirstCommandBuffer();
 	CreatePipelineCache();
 	ImguiInit();
-	CreateNullObjects();
+	if (nullTexture1D.image == VK_NULL_HANDLE)
+		CreateNullObjects();
 }
 
 void VulkanRenderer::Shutdown()
@@ -2044,6 +2160,9 @@ void VulkanRenderer::QueryAvailableFormats()
 
 bool VulkanRenderer::ImguiBegin(bool mainWindow)
 {
+	if (!IsSwapchainInfoValid(mainWindow))
+		return false;
+
 	if (!Renderer::ImguiBegin(mainWindow))
 		return false;
 
@@ -2099,7 +2218,8 @@ void VulkanRenderer::DeleteTexture(ImTextureID id)
 void VulkanRenderer::DeleteFontTextures()
 {
 	WaitDeviceIdle();
-	ImGui_ImplVulkan_DestroyFontsTexture();
+	if (m_imguiRenderPass != VK_NULL_HANDLE)
+		ImGui_ImplVulkan_DestroyFontsTexture();
 }
 
 
@@ -2233,7 +2353,11 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 	submitInfo.pWaitDstStageMask = semWaitStageMask;
 	submitInfo.pWaitSemaphores = waitSemArray;
 
-	const VkResult result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_cmd_buffer_fences[m_commandBufferIndex]);
+	VkResult result;
+	{
+		LibretroQueueLock queueLock;
+		result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_cmd_buffer_fences[m_commandBufferIndex]);
+	}
 	if (result != VK_SUCCESS)
 		UnrecoverableError(fmt::format("failed to submit command buffer. Error {}", result).c_str());
 	m_numSubmittedCmdBuffers++;
@@ -2388,6 +2512,11 @@ void VulkanRenderer::PipelineCacheSaveThread(size_t cache_size)
 
 void VulkanRenderer::CreatePipelineCache()
 {
+	// SetLibretroVulkanContext and Initialize both call this. Assigning a new
+	// std::thread over a still-running save thread calls std::terminate.
+	if (m_pipeline_cache != VK_NULL_HANDLE || m_pipeline_cache_save_thread.joinable())
+		return;
+
 	std::vector<uint8_t> cacheData;
 	const auto dir = ActiveSettings::GetCachePath("shaderCache/driver/vk");
 	if (fs::exists(dir))
@@ -3126,7 +3255,11 @@ void VulkanRenderer::SwapBuffer(bool mainWindow)
 		}
 	}
 
-	VkResult result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+	VkResult result;
+	{
+		LibretroQueueLock queueLock;
+		result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+	}
 	if (result < 0 && result != VK_ERROR_OUT_OF_DATE_KHR
 #if BOOST_PLAT_ANDROID
 		&& result != VK_ERROR_SURFACE_LOST_KHR
@@ -3178,6 +3311,11 @@ void VulkanBenchmarkPrintResults();
 
 void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
+	static uint32_t s_swapCount = 0;
+	if (s_swapCount++ % 60 == 0)
+	{
+		cemuLog_log(LogType::Force, "VulkanRenderer::SwapBuffers: swapTV={}, swapDRC={}", swapTV, swapDRC);
+	}
 	SubmitCommandBuffer();
 
 	if (swapTV && IsSwapchainInfoValid(true))
@@ -3270,6 +3408,34 @@ void VulkanRenderer::ClearColorImage(LatteTextureVk* vkTexture, uint32 sliceInde
 
 void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
+	static uint32_t s_quadCount = 0;
+	if (s_quadCount++ % 60 == 0)
+	{
+		cemuLog_log(LogType::Force, "DrawBackbufferQuad: padView={}, texView={}", padView, (void*)texView);
+	}
+	if (!padView && texView)
+	{
+		LatteTextureViewVk* texViewVk = static_cast<LatteTextureViewVk*>(texView);
+		auto viewRGBA = texViewVk->GetViewRGBA();
+		if (viewRGBA && texViewVk->GetBaseImage() && texViewVk->GetBaseImage()->GetImageObj())
+		{
+			uint32_t w = (imageWidth > 0) ? (uint32_t)imageWidth : 1280;
+			uint32_t h = (imageHeight > 0) ? (uint32_t)imageHeight : 720;
+			Libretro::SetVulkanImage(
+				viewRGBA->m_textureImageView,
+				texViewVk->GetBaseImage()->GetImageObj()->m_image,
+				texViewVk->GetFormat(),
+				w,
+				h
+			);
+		}
+		else
+		{
+			cemuLog_log(LogType::Force, "DrawBackbufferQuad: viewRGBA={}, baseImage={}",
+				(void*)viewRGBA, (void*)texViewVk->GetBaseImage());
+		}
+	}
+
 	if(!AcquireNextSwapchainImage(!padView))
 		return;
 

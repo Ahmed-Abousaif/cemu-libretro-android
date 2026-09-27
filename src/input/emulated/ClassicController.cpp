@@ -245,6 +245,40 @@ bool ClassicController::set_default_mapping(const std::shared_ptr<ControllerBase
 		
 		break;
 	}
+	case InputAPI::Device:
+	{
+		mapping =
+		{
+			{kButtonId_A, kButton0},
+			{kButtonId_B, kButton1},
+			{kButtonId_X, kButton2},
+			{kButtonId_Y, kButton3},
+
+			{kButtonId_L, kButton4},
+			{kButtonId_R, kButton5},
+			{kButtonId_ZL, kButtonZL},
+			{kButtonId_ZR, kButtonZR},
+
+			{kButtonId_Plus, kButton8},
+			{kButtonId_Minus, kButton9},
+
+			{kButtonId_Up, kButtonUp},
+			{kButtonId_Down, kButtonDown},
+			{kButtonId_Left, kButtonLeft},
+			{kButtonId_Right, kButtonRight},
+
+			{kButtonId_StickL_Up, kAxisYP},
+			{kButtonId_StickL_Down, kAxisYN},
+			{kButtonId_StickL_Left, kAxisXN},
+			{kButtonId_StickL_Right, kAxisXP},
+
+			{kButtonId_StickR_Up, kRotationYP},
+			{kButtonId_StickR_Down, kRotationYN},
+			{kButtonId_StickR_Left, kRotationXN},
+			{kButtonId_StickR_Right, kRotationXP},
+		};
+		break;
+	}
 	}
 
 	bool mapping_updated = false;

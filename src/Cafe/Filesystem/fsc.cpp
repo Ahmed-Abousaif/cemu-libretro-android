@@ -161,6 +161,7 @@ sint32 fsc_mount(std::string_view mountPath, std::string_view targetPath, fscDev
 		return FSC_STATUS_INVALID_PATH;
 	}
     node->AssignDevice(fscDevice, ctx, targetPathWithSlash);
+	cemuLog_log(LogType::Force, "fsc_mount: mounted '{}' -> '{}' (prio={})", mountPath, targetPathWithSlash, priority);
 	fscLeave();
 	return FSC_STATUS_OK;
 }

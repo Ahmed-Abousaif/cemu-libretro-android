@@ -439,6 +439,9 @@ public:
 
 	static void executeInstruction(PPCInterpreter_t* hCPU)
 	{
+		if (hCPU->instructionPointer == 0)
+			return;
+
 		if constexpr(ppcItpCtrl::allowSupervisorMode)
 		{
 			hCPU->global->tb++;

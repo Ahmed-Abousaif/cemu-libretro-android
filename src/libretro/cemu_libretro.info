@@ -1,0 +1,22 @@
+# Software Information
+display_name = "Nintendo - Wii U (Cemu)"
+authors = "Exzap|SSimco|Cemu Team"
+corename = "Cemu"
+categories = "Emulator"
+license = "MPL-2.0 / GPL-2.0-or-later"
+permissions = ""
+display_version = "2.0-ARM64"
+
+# Hardware Information
+manufacturer = "Nintendo"
+systemname = "Nintendo Wii U"
+systemid = "wii_u"
+
+# Libretro Features
+supports_no_game = "false"
+database = "Nintendo - Wii U"
+hw_render = "true"
+required_hw_api = "Vulkan >= 1.1"
+
+# Supported Extensions
+supported_extensions = "wud|wux|wua|iso|rpx|elf"

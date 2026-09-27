@@ -224,6 +224,12 @@ public:
 	void AppendOverlayDebugInfo() override;
 
 	void ImguiInit();
+
+	// Called from Libretro::OnVulkanContextReset to inject the frontend-provided
+	// Vulkan device/instance/queue before ImguiInit() is called.
+	void SetLibretroVulkanContext(VkInstance instance, VkPhysicalDevice physDevice,
+	                              VkDevice device, VkQueue queue, uint32_t queueFamily);
+
 	VkInstance GetVkInstance() const { return m_instance; }
 	VkDevice GetLogicalDevice() const { return m_logicalDevice; }
 	VkPhysicalDevice GetPhysicalDevice() const { return m_physicalDevice; }
@@ -604,6 +610,7 @@ private:
 	VkInstance m_instance = VK_NULL_HANDLE;
 	VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
 	VkDevice  m_logicalDevice = VK_NULL_HANDLE;
+	bool m_externalDevice = false;
 	VkDebugUtilsMessengerEXT m_debugCallback = nullptr;
 	volatile bool m_destructionRequested = false;
 

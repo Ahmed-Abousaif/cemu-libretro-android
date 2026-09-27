@@ -1392,12 +1392,12 @@ namespace coreinit
 		__OSUnlockScheduler(); // lock is always held when switching to a fiber, so we need to unlock it here
 		while (true)
 		{
-			if (hCPU->remainingCycles > 0)
+			if (hCPU->remainingCycles > 0 && hCPU->instructionPointer != 0)
 			{
 				// try to enter recompiler immediately
 				PPCRecompiler_attemptEnterWithoutRecompile(hCPU, hCPU->instructionPointer);
 				// keep executing as long as there are cycles left
-				while ((--hCPU->remainingCycles) >= 0)
+				while ((--hCPU->remainingCycles) >= 0 && hCPU->instructionPointer != 0)
 					PPCInterpreterSlim_executeInstruction(hCPU);
 			}
 

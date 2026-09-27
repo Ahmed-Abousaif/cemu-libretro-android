@@ -17,7 +17,13 @@ bool SupportsLoadingCustomDriver();
 
 extern bool g_vulkan_available;
 
-#endif
+#include "libretro/libretro_vulkan.h"
+
+namespace Libretro {
+	extern const struct retro_hw_render_interface_vulkan* vulkan_iface;
+}
+
+#endif // _VULKAN_API_
 
 #ifdef VKFUNC_DEFINE_CUSTOM
 	#define VKFUNC(__FUNC__) VKFUNC_DEFINE_CUSTOM(__FUNC__)
@@ -32,18 +38,43 @@ extern bool g_vulkan_available;
 		#if BOOST_OS_WINDOWS
 		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)GetProcAddress(hmodule, #__FUNC__)
 		#else
-		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)dlsym(vulkan_so, #__FUNC__)
+		#define VKFUNC(__FUNC__) do { \
+			__FUNC__ = vulkan_so ? (PFN_##__FUNC__)dlsym(vulkan_so, #__FUNC__) : nullptr; \
+			if (!__FUNC__) __FUNC__ = (PFN_##__FUNC__)dlsym(RTLD_DEFAULT, #__FUNC__); \
+		} while (0)
 		#endif
 		#define VKFUNC_INSTANCE(__FUNC__)
 		#define VKFUNC_DEVICE(__FUNC__)
 	#elif defined(VKFUNC_INSTANCE_INIT)
 		#define VKFUNC(__FUNC__) 
+		#if BOOST_OS_WINDOWS
 		#define VKFUNC_INSTANCE(__FUNC__) __FUNC__ = (PFN_##__FUNC__)vkGetInstanceProcAddr(instance, #__FUNC__)
+		#else
+		#define VKFUNC_INSTANCE(__FUNC__) do { \
+			if (!__FUNC__ && vkGetInstanceProcAddr) __FUNC__ = (PFN_##__FUNC__)vkGetInstanceProcAddr(instance, #__FUNC__); \
+			if (!__FUNC__ && Libretro::vulkan_iface && Libretro::vulkan_iface->get_instance_proc_addr) \
+				__FUNC__ = (PFN_##__FUNC__)Libretro::vulkan_iface->get_instance_proc_addr(instance, #__FUNC__); \
+			if (!__FUNC__ && vulkan_so) __FUNC__ = (PFN_##__FUNC__)dlsym(vulkan_so, #__FUNC__); \
+			if (!__FUNC__) __FUNC__ = (PFN_##__FUNC__)dlsym(RTLD_DEFAULT, #__FUNC__); \
+		} while (0)
+		#endif
 		#define VKFUNC_DEVICE(__FUNC__)
 	#elif defined(VKFUNC_DEVICE_INIT)
 		#define VKFUNC(__FUNC__) 
 		#define VKFUNC_INSTANCE(__FUNC__)
+		#if BOOST_OS_WINDOWS
 		#define VKFUNC_DEVICE(__FUNC__) __FUNC__ = (PFN_##__FUNC__)vkGetDeviceProcAddr(device, #__FUNC__)
+		#else
+		#define VKFUNC_DEVICE(__FUNC__) do { \
+			if (!__FUNC__ && vkGetDeviceProcAddr) __FUNC__ = (PFN_##__FUNC__)vkGetDeviceProcAddr(device, #__FUNC__); \
+			if (!__FUNC__ && Libretro::vulkan_iface && Libretro::vulkan_iface->get_device_proc_addr) \
+				__FUNC__ = (PFN_##__FUNC__)Libretro::vulkan_iface->get_device_proc_addr(device, #__FUNC__); \
+			if (!__FUNC__ && vkGetInstanceProcAddr && Libretro::vulkan_iface && Libretro::vulkan_iface->instance) \
+				__FUNC__ = (PFN_##__FUNC__)vkGetInstanceProcAddr(Libretro::vulkan_iface->instance, #__FUNC__); \
+			if (!__FUNC__ && vulkan_so) __FUNC__ = (PFN_##__FUNC__)dlsym(vulkan_so, #__FUNC__); \
+			if (!__FUNC__) __FUNC__ = (PFN_##__FUNC__)dlsym(RTLD_DEFAULT, #__FUNC__); \
+		} while (0)
+		#endif
 	#else
 		#define VKFUNC(__FUNC__) extern PFN_##__FUNC__ __FUNC__
 		#define VKFUNC_INSTANCE(__FUNC__) extern PFN_##__FUNC__ __FUNC__
@@ -158,7 +189,7 @@ VKFUNC_DEVICE(vkCreateSwapchainKHR);
 VKFUNC_DEVICE(vkDestroySwapchainKHR);
 VKFUNC_DEVICE(vkGetSwapchainImagesKHR);
 VKFUNC_DEVICE(vkAcquireNextImageKHR);
-VKFUNC_INSTANCE(vkQueuePresentKHR);
+VKFUNC_DEVICE(vkQueuePresentKHR);
 
 // fences
 VKFUNC_DEVICE(vkCreateFence);

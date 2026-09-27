@@ -19,9 +19,12 @@
 
 if (VCPKG_TARGET_ANDROID)
 
-    #
-    # 1. Check the presence of environment variable ANDROID_NDK_HOME
-    #
+    if (NOT DEFINED ENV{ANDROID_NDK_HOME})
+        if (DEFINED ANDROID_NDK)
+            set(ENV{ANDROID_NDK_HOME} "${ANDROID_NDK}")
+        endif()
+    endif()
+
     if (NOT DEFINED ENV{ANDROID_NDK_HOME})
         message(FATAL_ERROR "
         Please set an environment variable ANDROID_NDK_HOME
@@ -30,6 +33,12 @@ if (VCPKG_TARGET_ANDROID)
         Or:
         export ANDROID_NDK_HOME=/home/your-account/Android/android-ndk-r21b
         ")
+    endif()
+
+    if (NOT DEFINED ENV{VCPKG_ROOT})
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/vcpkg")
+            set(ENV{VCPKG_ROOT} "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/vcpkg")
+        endif()
     endif()
 
     #
@@ -93,6 +102,10 @@ if (VCPKG_TARGET_ANDROID)
     # with the VCPKG_CHAINLOAD_TOOLCHAIN_FILE option.
     set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE $ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake)
     set(CMAKE_TOOLCHAIN_FILE $ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake)
+    set(CMAKE_PROJECT_INCLUDE_BEFORE "${CMAKE_CURRENT_LIST_DIR}/android_linker_fix.cmake" CACHE FILEPATH "" FORCE)
+    set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_LIST_DIR}/android_linker_fix.cmake" CACHE FILEPATH "" FORCE)
+    set(CMAKE_USER_MAKE_RULES_OVERRIDE_CXX "${CMAKE_CURRENT_LIST_DIR}/android_linker_fix.cmake" CACHE FILEPATH "" FORCE)
+    set(CMAKE_USER_MAKE_RULES_OVERRIDE_C "${CMAKE_CURRENT_LIST_DIR}/android_linker_fix.cmake" CACHE FILEPATH "" FORCE)
     message("vcpkg_android.cmake: CMAKE_TOOLCHAIN_FILE was set to ${CMAKE_TOOLCHAIN_FILE}")
     message("vcpkg_android.cmake: VCPKG_CHAINLOAD_TOOLCHAIN_FILE was set to ${VCPKG_CHAINLOAD_TOOLCHAIN_FILE}")
 

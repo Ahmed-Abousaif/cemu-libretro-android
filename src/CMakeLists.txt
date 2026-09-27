@@ -70,6 +70,7 @@ if(ANDROID)
 	cemu_use_precompiled_header(CemuBin)
 
     add_subdirectory(android/app/src/main/cpp)
+    add_subdirectory(libretro)
 else()
 	add_executable(CemuBin
 		main.cpp

@@ -1,0 +1,30 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 16c6092..1e5bea4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,11 +1,7 @@
+-cmake_minimum_required(VERSION 3.14)
+-
+ if(NOT ${CMAKE_ANDROID_ARCH_ABI} STREQUAL arm64-v8a)
+ 	message(FATAL_ERROR "Unsupported target architecture: ${CMAKE_ANDROID_ARCH_ABI}. Please make an issue on the repo!")
+ endif()
+ 
+-project(adrenotools LANGUAGES CXX C)
+-
+ set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
+ 
+ add_subdirectory(lib/linkernsbypass)
+diff --git a/src/hook/CMakeLists.txt b/src/hook/CMakeLists.txt
+index ebff063..697579c 100644
+--- a/src/hook/CMakeLists.txt
++++ b/src/hook/CMakeLists.txt
+@@ -1,3 +1,9 @@
++message(STATUS "HOOK_IMPL CMAKE_SHARED_LINKER_FLAGS: '${CMAKE_SHARED_LINKER_FLAGS}'")
++message(STATUS "HOOK_IMPL CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO: '${CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO}'")
++message(STATUS "HOOK_IMPL CMAKE_EXE_LINKER_FLAGS: '${CMAKE_EXE_LINKER_FLAGS}'")
++message(STATUS "HOOK_IMPL CMAKE_CXX_FLAGS: '${CMAKE_CXX_FLAGS}'")
++message(STATUS "HOOK_IMPL CMAKE_CXX_FLAGS_RELWITHDEBINFO: '${CMAKE_CXX_FLAGS_RELWITHDEBINFO}'")
++
+ add_library(hook_impl SHARED hook_impl.cpp hook_impl.h hook_impl_params.h)
+ 
+ target_compile_options(hook_impl PRIVATE -Wall -Wextra)

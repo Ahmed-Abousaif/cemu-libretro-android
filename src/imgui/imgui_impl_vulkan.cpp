@@ -1316,6 +1316,11 @@ void ImGui_ImplVulkanH_DestroyWindowRenderBuffers(VkDevice device, ImGui_ImplVul
 
 ImTextureID ImGui_ImplVulkan_GenerateTexture(VkCommandBuffer commandBuffer, const std::vector<uint8>& data, const Vector2i& size)
 {
+    // Guard: if the Vulkan device hasn't been initialized yet (e.g. in the libretro
+    // path before OnVulkanContextReset fires), bail out safely instead of crashing.
+    if (g_VulkanInitInfo.Device == VK_NULL_HANDLE)
+        return nullptr;
+
     try
     {
         auto* texture = new ImGuiTexture();

@@ -193,28 +193,38 @@ bool FSTVolume::FindDiscKey(const fs::path& path, NCrypto::AesKey& discTitleKey)
 {
 	std::unique_ptr<FSTDataSourceWUD> dataSource(FSTDataSourceWUD::Open(path));
 	if (!dataSource)
+	{
+		cemuLog_log(LogType::Force, "FindDiscKey: Failed to open WUD/WUX data source for {}", _pathToUtf8(path));
 		return false;
+	}
 
 	// read section of header which should only contain zero bytes if decrypted
 	uint8 header[16*3];
 	if (dataSource->readData(0, 0, 0x18000 + 0x100, header, sizeof(header)) != sizeof(header))
+	{
+		cemuLog_log(LogType::Force, "FindDiscKey: Failed to read disc partition header from {}", _pathToUtf8(path));
 		return false;
+	}
 
 	// try all the keys
 	uint8 headerDecrypted[sizeof(header)-16];
+	sint32 testedKeys = 0;
 	for (sint32 i = 0; i < 0x7FFFFFFF; i++)
 	{
 		uint8* key128 = KeyCache_GetAES128(i);
 		if (key128 == NULL)
 			break;
+		testedKeys++;
 		AES128_CBC_decrypt(headerDecrypted, header + 16, sizeof(headerDecrypted), key128, header);
 		if (std::all_of(headerDecrypted, headerDecrypted + sizeof(headerDecrypted), [](const uint8 v) {return v == 0; }))
 		{
 			// key found
 			std::memcpy(discTitleKey.b, key128, 16);
+			cemuLog_log(LogType::Force, "FindDiscKey: Successfully found matching disc key (index {}) for {}", i, _pathToUtf8(path));
 			return true;
 		}
 	}
+	cemuLog_log(LogType::Force, "FindDiscKey: No matching disc key found for {} after testing {} cached keys. Ensure keys.txt contains the disc key.", _pathToUtf8(path), testedKeys);
 	return false;
 }
 

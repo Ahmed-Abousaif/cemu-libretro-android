@@ -96,19 +96,19 @@ struct ParsedMetaXml
 					parsedMetaXml->m_long_name[index] = longname;
 				}
 			}
-			else if (boost::starts_with(name, L"shortname_"))
+			else if (boost::starts_with(name, "shortname_"))
 			{
 				const sint32 index = GetLanguageIndex(name.substr(std::size("shortname_") - 1));
 				if (index != -1)
 					parsedMetaXml->m_short_name[index] = child.text().as_string();
 			}
-			else if (boost::starts_with(name, L"publisher_"))
+			else if (boost::starts_with(name, "publisher_"))
 			{
 				const sint32 index = GetLanguageIndex(name.substr(std::size("publisher_") - 1));
 				if (index != -1)
 					parsedMetaXml->m_publisher[index] = child.text().as_string();
 			}
-			else if (boost::starts_with(name, L"olv_accesskey"))
+			else if (boost::starts_with(name, "olv_accesskey"))
 				parsedMetaXml->m_olv_accesskey = child.text().as_uint(-1);
 		}
 		if (parsedMetaXml->m_title_id == 0)

@@ -76,12 +76,12 @@ PPCInterpreter_t* PPCCore_executeCallbackInternal(uint32 functionMPTR)
 	{
 		hCPU->remainingCycles = ppcThreadQuantum;
 		hCPU->skippedCycles = 0;
-		if (hCPU->remainingCycles > 0)
+		if (hCPU->remainingCycles > 0 && hCPU->instructionPointer != 0)
 		{
 			// try to enter recompiler immediately
 			PPCRecompiler_attemptEnter(hCPU, hCPU->instructionPointer);
 			// execute any remaining instructions in interpreter
-			while ((--hCPU->remainingCycles) >= 0)
+			while ((--hCPU->remainingCycles) >= 0 && hCPU->instructionPointer != 0)
 			{
 				PPCInterpreterSlim_executeInstruction(hCPU);
 			};

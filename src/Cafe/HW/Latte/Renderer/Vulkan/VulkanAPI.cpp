@@ -183,6 +183,10 @@ std::string get_custom_driver_lib_name(const fs::path& driver_path)
 
 std::optional<std::string> get_custom_driver_path()
 {
+	if (!g_current_game_profile)
+	{
+		return {};
+	}
 	const auto& driverSetting = g_current_game_profile->GetDriverSetting();
 	if (driverSetting.mode == DriverSettingMode::System)
 	{
@@ -254,27 +258,23 @@ void* dlopen_vulkan_loader()
 
 bool InitializeGlobalVulkan()
 {
-	g_vulkan_so = dlopen_vulkan_loader();
-
-	if (g_vulkan_available)
-		return true;
-
 	if (!g_vulkan_so)
-	{
-		cemuLog_log(LogType::Force, "Vulkan loader not available.");
-		return false;
-	}
+		g_vulkan_so = dlopen_vulkan_loader();
 
 	void* vulkan_so = g_vulkan_so;
 
 	#define VKFUNC_INIT
 	#include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 
-	if(!vkEnumerateInstanceVersion)
-	{
-		cemuLog_log(LogType::Force, "vkEnumerateInstanceVersion not available. Outdated graphics driver or Vulkan runtime?");
-		return false;
-	}
+	if (vkGetInstanceProcAddr == nullptr && vulkan_so != nullptr)
+		vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(vulkan_so, "vkGetInstanceProcAddr");
+	if (vkGetInstanceProcAddr == nullptr)
+		vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr");
+
+	if (vkGetDeviceProcAddr == nullptr && vulkan_so != nullptr)
+		vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)dlsym(vulkan_so, "vkGetDeviceProcAddr");
+	if (vkGetDeviceProcAddr == nullptr)
+		vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)dlsym(RTLD_DEFAULT, "vkGetDeviceProcAddr");
 
 	g_vulkan_available = true;
 	return true;
@@ -298,9 +298,17 @@ void CleanupGlobalVulkan()
 
 bool InitializeInstanceVulkan(VkInstance instance)
 {
+	if (!g_vulkan_so)
+		g_vulkan_so = dlopen_vulkan_loader();
+
 	void* vulkan_so = g_vulkan_so;
-	if (!vulkan_so)
-		return false;
+
+	if (vkGetInstanceProcAddr == nullptr && Libretro::vulkan_iface && Libretro::vulkan_iface->get_instance_proc_addr)
+		vkGetInstanceProcAddr = Libretro::vulkan_iface->get_instance_proc_addr;
+	if (vkGetInstanceProcAddr == nullptr && vulkan_so != nullptr)
+		vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(vulkan_so, "vkGetInstanceProcAddr");
+	if (vkGetInstanceProcAddr == nullptr)
+		vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr");
 
 	#define VKFUNC_INSTANCE_INIT
 	#include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
@@ -310,9 +318,19 @@ bool InitializeInstanceVulkan(VkInstance instance)
 
 bool InitializeDeviceVulkan(VkDevice device)
 {
+	if (!g_vulkan_so)
+		g_vulkan_so = dlopen_vulkan_loader();
+
 	void* vulkan_so = g_vulkan_so;
-	if (!vulkan_so)
-		return false;
+
+	if (vkGetDeviceProcAddr == nullptr && Libretro::vulkan_iface && Libretro::vulkan_iface->get_device_proc_addr)
+		vkGetDeviceProcAddr = Libretro::vulkan_iface->get_device_proc_addr;
+	if (vkGetDeviceProcAddr == nullptr && vulkan_so != nullptr)
+		vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)dlsym(vulkan_so, "vkGetDeviceProcAddr");
+	if (vkGetDeviceProcAddr == nullptr && vkGetInstanceProcAddr && Libretro::vulkan_iface && Libretro::vulkan_iface->instance)
+		vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr(Libretro::vulkan_iface->instance, "vkGetDeviceProcAddr");
+	if (vkGetDeviceProcAddr == nullptr)
+		vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)dlsym(RTLD_DEFAULT, "vkGetDeviceProcAddr");
 
 	#define VKFUNC_DEVICE_INIT
 	#include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
@@ -321,6 +339,9 @@ bool InitializeDeviceVulkan(VkDevice device)
 	#define VKFUNC_DEFINE_CUSTOM(__func) __func = VkWrapperFuncGenTest(__func, #__func)
 	#include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #endif
+
+	cemuLog_log(LogType::Force, "InitializeDeviceVulkan: vkCreateBuffer={}, vkAllocateMemory={}, vkCmdDraw={}",
+		(void*)vkCreateBuffer, (void*)vkAllocateMemory, (void*)vkCmdDraw);
 
 	return true;
 }

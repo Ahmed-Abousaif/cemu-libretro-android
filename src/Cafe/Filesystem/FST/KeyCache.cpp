@@ -1,4 +1,6 @@
 #include <mutex>
+#include <vector>
+#include <algorithm>
 
 #include "Cemu/Logging/CemuLogging.h"
 #include "WindowSystem.h"
@@ -6,6 +8,7 @@
 #include "util/crypto/aes128.h"
 #include "Common/FileStream.h"
 #include "util/helpers/StringHelpers.h"
+#include "util/helpers/helpers.h"
 
 std::mutex mtxKeyCache;
 
@@ -40,8 +43,13 @@ uint8* KeyCache_GetAES128(sint32 index)
 	return keyCacheEntry->aes128key;
 }
 
-void KeyCache_AddKey128(uint8* key)
+void KeyCache_AddKey128(const uint8* key)
 {
+	for (const auto& entry : g_keyCache)
+	{
+		if (memcmp(entry.aes128key, key, 16) == 0)
+			return;
+	}
 	KeyCacheEntry newEntry = {0};
 	memcpy(newEntry.aes128key, key, 16);
 	g_keyCache.emplace_back(newEntry);
@@ -52,78 +60,104 @@ bool sKeyCachePrepared = false;
 void KeyCache_Prepare()
 {
 	mtxKeyCache.lock();
-	if (sKeyCachePrepared)
+	if (sKeyCachePrepared && !g_keyCache.empty())
 	{
 		mtxKeyCache.unlock();
 		return;
 	}
 	sKeyCachePrepared = true;
 	g_keyCache.clear();
-	// load keys
-	auto keysPath = ActiveSettings::GetUserDataPath("keys.txt");
-	FileStream* fs_keys = FileStream::openFile2(keysPath);
-	if( !fs_keys )
+
+	std::vector<fs::path> candidatePaths;
+	candidatePaths.push_back(ActiveSettings::GetUserDataPath("keys.txt"));
+	candidatePaths.push_back(ActiveSettings::GetUserDataPath().parent_path() / "keys.txt");
+	candidatePaths.push_back(ActiveSettings::GetConfigPath("keys.txt"));
+	candidatePaths.push_back(ActiveSettings::GetConfigPath().parent_path() / "keys.txt");
+	candidatePaths.push_back(ActiveSettings::GetDataPath("keys.txt"));
+	candidatePaths.push_back(ActiveSettings::GetDataPath().parent_path() / "keys.txt");
+	candidatePaths.push_back(fs::path("/sdcard/Download/keys.txt"));
+	candidatePaths.push_back(fs::path("/sdcard/Download/Roms/wiiu/keys.txt"));
+	candidatePaths.push_back(fs::path("/sdcard/Download/Roms/keys.txt"));
+	candidatePaths.push_back(fs::path("/sdcard/keys.txt"));
+
+	// Deduplicate candidate paths
+	std::vector<fs::path> uniquePaths;
+	for (const auto& p : candidatePaths)
 	{
-		fs_keys = FileStream::createFile2(keysPath);
-		if(fs_keys)
+		if (p.empty()) continue;
+		if (std::find(uniquePaths.begin(), uniquePaths.end(), p) == uniquePaths.end())
+			uniquePaths.push_back(p);
+	}
+
+	bool loadedAny = false;
+	for (const auto& keysPath : uniquePaths)
+	{
+		FileStream* fs_keys = FileStream::openFile2(keysPath);
+		if (!fs_keys)
+			continue;
+
+		cemuLog_log(LogType::Force, "KeyCache: Reading keys from {}", _pathToUtf8(keysPath));
+		sint32 lineNumber = 0;
+		std::string line;
+		size_t keysInFile = 0;
+		while (fs_keys->readLine(line))
+		{
+			lineNumber++;
+			// truncate anything after '#' or ';'
+			for (size_t i = 0; i < line.size(); i++)
+			{
+				if (line[i] == '#' || line[i] == ';')
+				{
+					line.resize(i);
+					break;
+				}
+			}
+			// remove whitespaces and other common formatting characters
+			auto itr = line.begin();
+			while (itr != line.end())
+			{
+				char c = *itr;
+				if (c == ' ' || c == '\t' || c == '-' || c == '_')
+					itr = line.erase(itr);
+				else
+					itr++;
+			}
+			if (line.empty())
+				continue;
+			if (strishex(line) == false)
+			{
+				cemuLog_log(LogType::Force, "KeyCache: Format error in {} at line {}", _pathToUtf8(keysPath), lineNumber);
+				continue;
+			}
+			if (line.size() == 32)
+			{
+				// 128-bit key
+				uint8 keyData128[16];
+				StringHelpers::ParseHexString(line, keyData128, 16);
+				KeyCache_AddKey128(keyData128);
+				keysInFile++;
+			}
+		}
+		delete fs_keys;
+		loadedAny = true;
+		cemuLog_log(LogType::Force, "KeyCache: Loaded {} valid key(s) from {}", keysInFile, _pathToUtf8(keysPath));
+	}
+
+	if (!loadedAny)
+	{
+		auto defaultKeysPath = ActiveSettings::GetUserDataPath("keys.txt");
+		FileStream* fs_keys = FileStream::createFile2(defaultKeysPath);
+		if (fs_keys)
 		{
 			fs_keys->writeString("# this file contains keys needed for decryption of disc file system data (WUD/WUX)\r\n");
 			fs_keys->writeString("# 1 key per line, any text after a '#' character is considered a comment\r\n");
 			fs_keys->writeString("# the emulator will automatically pick the right key\r\n");
 			fs_keys->writeString("541b9889519b27d363cd21604b97c67a # example key (can be deleted)\r\n");
 			delete fs_keys;
-		}
-		else
-		{
-			WindowSystem::ShowErrorDialog(_tr("Unable to create file keys.txt\nThis can happen if Cemu does not have write permission to its own directory, the disk is full or if anti-virus software is blocking Cemu."), _tr("Error"), WindowSystem::ErrorCategory::KEYS_TXT_CREATION);
-		}
-		mtxKeyCache.unlock();
-		return;
-	}
-	sint32 lineNumber = 0;
-	std::string line;
-	while( fs_keys->readLine(line) )
-	{
-		lineNumber++;
-		// truncate anything after '#' or ';'
-		for(size_t i=0; i<line.size(); i++)
-		{
-			if(line[i] == '#' || line[i] == ';' )
-			{
-				line.resize(i);
-				break;
-			}
-		}
-		// remove whitespaces and other common formatting characters
-		auto itr = line.begin();
-		while (itr != line.end())
-		{
-			char c = *itr;
-			if (c == ' ' || c == '\t' || c == '-' || c == '_')
-				itr = line.erase(itr);
-			else
-				itr++;
-		}
-		if (line.empty())
-			continue;
-		if( strishex(line) == false )
-		{
-			auto errorMsg = _tr("Error in keys.txt at line {}", lineNumber);
-			WindowSystem::ShowErrorDialog(errorMsg, WindowSystem::ErrorCategory::KEYS_TXT_CREATION);
-			continue;
-		}
-		if(line.size() == 32 )
-		{
-			// 128-bit key
-			uint8 keyData128[16];
-			StringHelpers::ParseHexString(line, keyData128, 16);
-			KeyCache_AddKey128(keyData128);
-		}
-		else
-		{
-			// invalid key length
+			cemuLog_log(LogType::Force, "KeyCache: Created template keys.txt at {}", _pathToUtf8(defaultKeysPath));
 		}
 	}
-	delete fs_keys;
+
+	cemuLog_log(LogType::Force, "KeyCache: Total keys cached: {}", g_keyCache.size());
 	mtxKeyCache.unlock();
 }
