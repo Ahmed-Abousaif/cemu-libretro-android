@@ -47,9 +47,12 @@ class FileStreamUnix
 
  private:
 	void SyncReadWriteSeek(bool nextOpIsWrite);
+	bool SyncToDisk();
 	FileStreamUnix(const fs::path& path, bool isOpen, bool isWriteable);
 
 	bool m_isValid{};
+	bool m_dirty{false};
+	fs::path m_path;
 	std::fstream m_fileStream;
 	bool m_prevOperationWasWrite{false};
 

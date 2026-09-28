@@ -158,6 +158,12 @@ struct FSCVirtualFile
 		return false;
 	}
 
+	// Push userspace buffers to storage. Archive-backed files have nothing to commit.
+	virtual bool fscFlush()
+	{
+		return true;
+	}
+
 	FSCDirIteratorState* dirIterator{};
 
 	bool m_isAppend{ false };

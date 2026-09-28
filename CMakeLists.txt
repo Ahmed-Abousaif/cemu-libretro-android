@@ -41,7 +41,11 @@ if (ENABLE_VCPKG)
 
 	if(VCPKG_TARGET_ANDROID)
 		set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/dependencies/vcpkg_overlay_ports")
-		set(ENV{ANDROID_NDK_HOME} ${ANDROID_NDK})
+		# ANDROID_NDK is only defined after the toolchain loads. An empty
+		# assignment unsets ANDROID_NDK_HOME and breaks the vcpkg Android setup.
+		if(ANDROID_NDK)
+			set(ENV{ANDROID_NDK_HOME} "${ANDROID_NDK}")
+		endif()
 		set(ENV{VCPKG_ROOT} "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/vcpkg")
 		include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/vcpkg_android.cmake")
 	elseif(UNIX AND NOT APPLE)

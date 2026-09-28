@@ -1972,6 +1972,7 @@ void VulkanRenderer::Shutdown()
 {
 	SubmitCommandBuffer();
 	WaitDeviceIdle();
+	DestroyLibretroOutputs();
 	// stop compilation threads
 	RendererShaderVk::Shutdown();
 	PipelineCompiler::CompileThreadPool_Stop();
@@ -3311,12 +3312,15 @@ void VulkanBenchmarkPrintResults();
 
 void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
-	static uint32_t s_swapCount = 0;
-	if (s_swapCount++ % 60 == 0)
+	VkSemaphore frameSemaphore = VK_NULL_HANDLE;
+	if (m_libretroPendingIndex >= 0)
 	{
-		cemuLog_log(LogType::Force, "VulkanRenderer::SwapBuffers: swapTV={}, swapDRC={}", swapTV, swapDRC);
+		frameSemaphore = m_libretroOutputs[m_libretroPendingIndex].semaphore;
+		m_libretroPendingIndex = -1;
 	}
-	SubmitCommandBuffer();
+	SubmitCommandBuffer(frameSemaphore);
+	if (frameSemaphore != VK_NULL_HANDLE)
+		Libretro::MarkVulkanFrameSubmitted();
 
 	if (swapTV && IsSwapchainInfoValid(true))
 		SwapBuffer(true);
@@ -3406,34 +3410,205 @@ void VulkanRenderer::ClearColorImage(LatteTextureVk* vkTexture, uint32 sliceInde
 	vkTexture->SetImageLayout(subresourceRange, outputLayout);
 }
 
+void VulkanRenderer::DestroyLibretroOutputImage(LibretroOutputImage& output)
+{
+	if (m_logicalDevice == VK_NULL_HANDLE)
+		return;
+	if (output.view != VK_NULL_HANDLE)
+	{
+		vkDestroyImageView(m_logicalDevice, output.view, nullptr);
+		output.view = VK_NULL_HANDLE;
+	}
+	if (output.image != VK_NULL_HANDLE)
+	{
+		vkDestroyImage(m_logicalDevice, output.image, nullptr);
+		output.image = VK_NULL_HANDLE;
+	}
+	if (output.allocation && memoryManager)
+		memoryManager->imageMemoryFree(output.allocation);
+	output.allocation = nullptr;
+	output.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	output.width = 0;
+	output.height = 0;
+}
+
+void VulkanRenderer::DestroyLibretroOutputs()
+{
+	m_libretroPendingIndex = -1;
+	for (auto& output : m_libretroOutputs)
+	{
+		DestroyLibretroOutputImage(output);
+		if (output.semaphore != VK_NULL_HANDLE && m_logicalDevice != VK_NULL_HANDLE)
+		{
+			vkDestroySemaphore(m_logicalDevice, output.semaphore, nullptr);
+			output.semaphore = VK_NULL_HANDLE;
+		}
+	}
+}
+
+bool VulkanRenderer::EnsureLibretroOutput(uint32 index, uint32 width, uint32 height)
+{
+	if (index >= kLibretroOutputImages || m_logicalDevice == VK_NULL_HANDLE || width == 0 || height == 0)
+		return false;
+	auto& output = m_libretroOutputs[index];
+	if (output.semaphore == VK_NULL_HANDLE)
+	{
+		VkSemaphoreCreateInfo semInfo{};
+		semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+		if (vkCreateSemaphore(m_logicalDevice, &semInfo, nullptr, &output.semaphore) != VK_SUCCESS)
+			return false;
+	}
+	if (output.image != VK_NULL_HANDLE && output.width == width && output.height == height)
+		return output.view != VK_NULL_HANDLE;
+
+	DestroyLibretroOutputImage(output);
+
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imageInfo.extent = {width, height, 1};
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = 1;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &output.image) != VK_SUCCESS)
+		return false;
+	output.allocation = memoryManager->imageMemoryAllocate(output.image);
+	if (!output.allocation)
+	{
+		vkDestroyImage(m_logicalDevice, output.image, nullptr);
+		output.image = VK_NULL_HANDLE;
+		return false;
+	}
+
+	VkImageViewCreateInfo viewInfo{};
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.image = output.image;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = 0;
+	viewInfo.subresourceRange.layerCount = 1;
+	if (vkCreateImageView(m_logicalDevice, &viewInfo, nullptr, &output.view) != VK_SUCCESS)
+	{
+		DestroyLibretroOutputImage(output);
+		return false;
+	}
+	output.width = width;
+	output.height = height;
+	output.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	return true;
+}
+
+bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk)
+{
+	if (!texViewVk || !m_state.currentCommandBuffer || !Libretro::vulkan_iface)
+		return false;
+	draw_endRenderPass();
+	LatteTextureVk* baseImageTex = texViewVk->GetBaseImage();
+	if (!baseImageTex || !baseImageTex->GetImageObj())
+		return false;
+
+	int srcWidth = 0;
+	int srcHeight = 0;
+	baseImageTex->GetEffectiveSize(srcWidth, srcHeight, 0);
+	if (srcWidth <= 0 || srcHeight <= 0)
+		return false;
+
+	uint32 index = 0;
+	if (Libretro::vulkan_iface->get_sync_index)
+		index = Libretro::vulkan_iface->get_sync_index(Libretro::vulkan_iface->handle);
+	if (index >= kLibretroOutputImages)
+		index = index % kLibretroOutputImages;
+	if (Libretro::vulkan_iface->wait_sync_index)
+		Libretro::vulkan_iface->wait_sync_index(Libretro::vulkan_iface->handle);
+	if (!EnsureLibretroOutput(index, (uint32)srcWidth, (uint32)srcHeight))
+		return false;
+
+	auto& output = m_libretroOutputs[index];
+	baseImageTex->GetImageObj()->flagForCurrentCommandBuffer();
+
+	VkImageSubresourceLayers layers{};
+	layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	layers.mipLevel = 0;
+	layers.baseArrayLayer = (uint32)texViewVk->firstSlice;
+	layers.layerCount = 1;
+
+	VkImageSubresourceRange srcRange{};
+	srcRange.aspectMask = layers.aspectMask;
+	srcRange.baseMipLevel = 0;
+	srcRange.levelCount = 1;
+	srcRange.baseArrayLayer = layers.baseArrayLayer;
+	srcRange.layerCount = 1;
+	const VkImageLayout oldLayout = baseImageTex->GetImageLayout(srcRange);
+	barrier_image<IMAGE_READ | IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(baseImageTex, layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+	VkImageSubresourceRange dstRange{};
+	dstRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	dstRange.baseMipLevel = 0;
+	dstRange.levelCount = 1;
+	dstRange.baseArrayLayer = 0;
+	dstRange.layerCount = 1;
+	barrier_image<TRANSFER_READ, TRANSFER_WRITE>(output.image, dstRange, output.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+	VkImageBlit region{};
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.mipLevel = 0;
+	region.srcSubresource.baseArrayLayer = layers.baseArrayLayer;
+	region.srcSubresource.layerCount = 1;
+	region.srcOffsets[1] = {srcWidth, srcHeight, 1};
+	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.dstSubresource.mipLevel = 0;
+	region.dstSubresource.baseArrayLayer = 0;
+	region.dstSubresource.layerCount = 1;
+	region.dstOffsets[1] = {srcWidth, srcHeight, 1};
+	vkCmdBlitImage(
+		m_state.currentCommandBuffer,
+		baseImageTex->GetImageObj()->m_image,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		output.image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1,
+		&region,
+		VK_FILTER_NEAREST);
+
+	barrier_image<TRANSFER_WRITE, IMAGE_READ>(output.image, dstRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	output.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	barrier_image<TRANSFER_READ, IMAGE_READ | IMAGE_WRITE>(baseImageTex, layers, oldLayout);
+
+	Libretro::SetVulkanImage(
+		output.view,
+		output.image,
+		VK_FORMAT_R8G8B8A8_UNORM,
+		(uint32)srcWidth,
+		(uint32)srcHeight,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		output.semaphore);
+	m_libretroPendingIndex = (int)index;
+	return true;
+}
+
 void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
-	static uint32_t s_quadCount = 0;
-	if (s_quadCount++ % 60 == 0)
+	if (!padView && texView && !IsSwapchainInfoValid(true))
 	{
-		cemuLog_log(LogType::Force, "DrawBackbufferQuad: padView={}, texView={}", padView, (void*)texView);
-	}
-	if (!padView && texView)
-	{
-		LatteTextureViewVk* texViewVk = static_cast<LatteTextureViewVk*>(texView);
-		auto viewRGBA = texViewVk->GetViewRGBA();
-		if (viewRGBA && texViewVk->GetBaseImage() && texViewVk->GetBaseImage()->GetImageObj())
+		if (!BlitLibretroOutput(static_cast<LatteTextureViewVk*>(texView)))
 		{
-			uint32_t w = (imageWidth > 0) ? (uint32_t)imageWidth : 1280;
-			uint32_t h = (imageHeight > 0) ? (uint32_t)imageHeight : 720;
-			Libretro::SetVulkanImage(
-				viewRGBA->m_textureImageView,
-				texViewVk->GetBaseImage()->GetImageObj()->m_image,
-				texViewVk->GetFormat(),
-				w,
-				h
-			);
+			static bool s_loggedBlitFailure = false;
+			if (!s_loggedBlitFailure)
+			{
+				cemuLog_log(LogType::Force, "Libretro output blit failed");
+				s_loggedBlitFailure = true;
+			}
 		}
-		else
-		{
-			cemuLog_log(LogType::Force, "DrawBackbufferQuad: viewRGBA={}, baseImage={}",
-				(void*)viewRGBA, (void*)texViewVk->GetBaseImage());
-		}
+		return;
 	}
 
 	if(!AcquireNextSwapchainImage(!padView))
