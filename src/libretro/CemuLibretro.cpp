@@ -171,6 +171,7 @@ namespace Libretro::Cemu
 	{
 		Libretro::PollInput();
 		Libretro::UpdateCoreOptions();
+		Libretro::DrainAudio();
 		Libretro::PresentVulkanFrame();
 	}
 

@@ -4,6 +4,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #include "Cafe/HW/Latte/Core/LatteOverlay.h"
 #include "Common/precompiled.h"
+#include <mutex>
 
 namespace Libretro
 {
@@ -14,6 +15,10 @@ namespace Libretro
 		static uint32_t s_frame_height = 720;
 		static struct retro_vulkan_image s_current_image{};
 		static bool s_has_image = false;
+		static bool s_new_frame = false;
+		static bool s_frame_pending = false;
+		static VkSemaphore s_frame_semaphore = VK_NULL_HANDLE;
+		static std::mutex s_frame_mutex;
 	} // namespace
 
 	void SetVideoRefreshCallback(retro_video_refresh_t cb)
@@ -21,16 +26,11 @@ namespace Libretro
 		s_video_cb = cb;
 	}
 
-	void SetVulkanImage(VkImageView view, VkImage image, VkFormat format, uint32_t width, uint32_t height)
+	void SetVulkanImage(VkImageView view, VkImage image, VkFormat format, uint32_t width, uint32_t height, VkImageLayout layout, VkSemaphore semaphore)
 	{
-		static uint32_t s_setCount = 0;
-		if (s_setCount++ % 60 == 0 || !s_has_image)
-		{
-			LogInfo("SetVulkanImage: view=%p, img=%p, format=%d, %ux%u (count=%u)",
-				(void*)view, (void*)image, (int)format, width, height, s_setCount);
-		}
+		std::lock_guard lock(s_frame_mutex);
 		s_current_image.image_view = view;
-		s_current_image.image_layout = VK_IMAGE_LAYOUT_GENERAL;
+		s_current_image.image_layout = layout;
 		s_current_image.create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		s_current_image.create_info.image = image;
 		s_current_image.create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -38,23 +38,43 @@ namespace Libretro
 		if (width > 0) s_frame_width = width;
 		if (height > 0) s_frame_height = height;
 		s_has_image = (view != VK_NULL_HANDLE);
+		s_frame_semaphore = semaphore;
+		s_frame_pending = s_has_image;
+		s_new_frame = false;
+	}
+
+	void MarkVulkanFrameSubmitted()
+	{
+		std::lock_guard lock(s_frame_mutex);
+		s_new_frame = s_frame_pending;
+		s_frame_pending = false;
 	}
 
 	void PresentVulkanFrame()
 	{
-		static uint32_t s_presentCount = 0;
-		if (vulkan_iface && vulkan_iface->set_image && s_has_image)
+		bool presentNew = false;
+		uint32_t width = 0;
+		uint32_t height = 0;
 		{
-			if (s_presentCount++ % 60 == 0)
+			std::lock_guard lock(s_frame_mutex);
+			presentNew = s_new_frame && s_has_image;
+			s_new_frame = false;
+			width = s_frame_width;
+			height = s_frame_height;
+			if (presentNew && vulkan_iface && vulkan_iface->set_image)
 			{
-				LogInfo("PresentVulkanFrame: calling set_image with view=%p, %ux%u",
-					(void*)s_current_image.image_view, s_frame_width, s_frame_height);
+				const uint32_t semaphoreCount = s_frame_semaphore != VK_NULL_HANDLE ? 1u : 0u;
+				vulkan_iface->set_image(
+					vulkan_iface->handle,
+					&s_current_image,
+					semaphoreCount,
+					semaphoreCount ? &s_frame_semaphore : nullptr,
+					VK_QUEUE_FAMILY_IGNORED);
 			}
-			vulkan_iface->set_image(vulkan_iface->handle, &s_current_image, 0, nullptr, VK_QUEUE_FAMILY_IGNORED);
 		}
 		if (s_video_cb)
 		{
-			s_video_cb(s_has_image ? RETRO_HW_FRAME_BUFFER_VALID : nullptr, s_frame_width, s_frame_height, 0);
+			s_video_cb(presentNew ? RETRO_HW_FRAME_BUFFER_VALID : nullptr, width, height, 0);
 		}
 	}
 
@@ -150,6 +170,12 @@ namespace Libretro
 	void OnVulkanContextDestroy()
 	{
 		LogInfo("Vulkan context destroy triggered.");
+		// Idle the GPU while lock_queue still works. Clearing vulkan_iface first
+		// makes LibretroQueueLock a no-op while the device is still in use.
+		if (g_renderer)
+		{
+			g_renderer->Flush(true);
+		}
 		vulkan_iface = nullptr;
 	}
 } // namespace Libretro

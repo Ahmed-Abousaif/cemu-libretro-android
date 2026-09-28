@@ -664,6 +664,24 @@ private:
 	void DeleteNullTexture(NullTexture& nullTex);
 	void DeleteNullObjects();
 
+	static constexpr uint32 kLibretroOutputImages = 3;
+	struct LibretroOutputImage
+	{
+		VkImage image = VK_NULL_HANDLE;
+		VkImageView view = VK_NULL_HANDLE;
+		VkImageMemAllocation* allocation = nullptr;
+		VkSemaphore semaphore = VK_NULL_HANDLE;
+		VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		uint32 width = 0;
+		uint32 height = 0;
+	};
+	LibretroOutputImage m_libretroOutputs[kLibretroOutputImages]{};
+	int m_libretroPendingIndex = -1;
+	void DestroyLibretroOutputImage(LibretroOutputImage& output);
+	void DestroyLibretroOutputs();
+	bool EnsureLibretroOutput(uint32 index, uint32 width, uint32 height);
+	bool BlitLibretroOutput(LatteTextureViewVk* texView);
+
 	// if VK_EXT_external_memory_host is supported we can (optionally) import all of the Wii U memory into a Vulkan memory object
 	// this allows us to skip any vertex/uniform caching logic and let the GPU directly read the memory from main RAM
 	// Wii U memory imported into a buffer

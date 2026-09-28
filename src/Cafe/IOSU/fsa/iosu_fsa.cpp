@@ -227,6 +227,29 @@ namespace iosu
 				return it.fscFile;
 			}
 
+			void FlushAll()
+			{
+				for (auto& it : m_handleTable)
+				{
+					if (it.isAllocated && it.fscFile)
+						it.fscFile->fscFlush();
+				}
+			}
+
+			void CloseAll()
+			{
+				for (auto& it : m_handleTable)
+				{
+					if (!it.isAllocated)
+						continue;
+					FSCVirtualFile* fscFile = it.fscFile;
+					it.fscFile = nullptr;
+					it.isAllocated = false;
+					if (fscFile)
+						fsc_close(fscFile);
+				}
+			}
+
 		private:
 			uint32 m_currentCounter = 1;
 			std::array<_FSAHandleResource, 0x3C0> m_handleTable;
@@ -588,6 +611,11 @@ namespace iosu
 
 		FSA_RESULT FSAProcessCmd_flushQuota(FSAClient* client, FSAShimBuffer* shimBuffer)
 		{
+			(void)client;
+			(void)shimBuffer;
+			// Wii U save commit. Every open host file still holding userspace
+			// buffers has to reach storage before this returns success.
+			sFileHandleTable.FlushAll();
 			return FSA_RESULT::OK;
 		}
 
@@ -607,6 +635,12 @@ namespace iosu
 
 		FSA_RESULT FSAProcessCmd_flushFile(FSAClient* client, FSAShimBuffer* shimBuffer)
 		{
+			(void)client;
+			FSCVirtualFile* fscFile = sFileHandleTable.GetByHandle(shimBuffer->request.cmdFlushFile.fileHandle);
+			if (!fscFile)
+				return FSA_RESULT::INVALID_FILE_HANDLE;
+			if (!fscFile->fscFlush())
+				return FSA_RESULT::FATAL_ERROR;
 			return FSA_RESULT::OK;
 		}
 
@@ -901,6 +935,8 @@ namespace iosu
 		{
 			IOS_SendMessage(sFSAIoMsgQueue, 0, 0);
 			sFSAIoThread.join();
+			sFileHandleTable.CloseAll();
+			sDirHandleTable.CloseAll();
 		}
 	} // namespace fsa
 } // namespace iosu

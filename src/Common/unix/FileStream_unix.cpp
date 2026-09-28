@@ -1,5 +1,7 @@
 #include "Common/unix/FileStream_unix.h"
 #include <cstdarg>
+#include <fcntl.h>
+#include <unistd.h>
 
 fs::path findPathCI(const fs::path& path)
 {
@@ -101,9 +103,29 @@ uint64 FileStreamUnix::GetSize()
 
 bool FileStreamUnix::SetEndOfFile()
 {
-	assert_dbg();
+	if (!m_isValid)
+		return false;
+	const std::streampos pos = m_prevOperationWasWrite ? m_fileStream.tellp() : m_fileStream.tellg();
+	if (pos < 0)
+		return false;
+	m_fileStream.flush();
+	if (!m_fileStream)
+		return false;
+	std::error_code ec;
+	fs::resize_file(m_path, static_cast<std::uintmax_t>(pos), ec);
+	if (ec)
+	{
+		cemuLog_log(LogType::Force, "SetEndOfFile failed: {}", ec.message());
+		return false;
+	}
+	m_fileStream.clear();
+	m_fileStream.seekg(pos);
+	m_fileStream.seekp(pos);
+	m_dirty = true;
+	if (!SyncToDisk())
+		return false;
+	m_dirty = false;
 	return true;
-	//return ::SetEndOfFile(m_hFile) != 0;
 }
 
 void FileStreamUnix::extract(std::vector<uint8>& data)
@@ -114,9 +136,32 @@ void FileStreamUnix::extract(std::vector<uint8>& data)
 	readData(data.data(), fileSize);
 }
 
+bool FileStreamUnix::SyncToDisk()
+{
+	m_fileStream.flush();
+	if (!m_fileStream || m_path.empty())
+		return false;
+	const int fd = ::open(m_path.c_str(), O_RDONLY);
+	if (fd < 0)
+		return false;
+	const int synced = ::fsync(fd);
+	::close(fd);
+	return synced == 0;
+}
+
 void FileStreamUnix::Flush()
 {
-    m_fileStream.flush();
+	if (!m_isValid)
+		return;
+	if (!m_dirty)
+	{
+		m_fileStream.flush();
+		return;
+	}
+	if (SyncToDisk())
+		m_dirty = false;
+	else
+		cemuLog_log(LogType::Force, "Failed to commit file to storage");
 }
 
 uint32 FileStreamUnix::readData(void* data, uint32 length)
@@ -161,8 +206,13 @@ bool FileStreamUnix::readLine(std::string& line)
 
 sint32 FileStreamUnix::writeData(const void* data, sint32 length)
 {
+	if (length <= 0)
+		return 0;
 	SyncReadWriteSeek(true);
-	m_fileStream.write((const char*)data, length);
+	m_fileStream.write(static_cast<const char*>(data), length);
+	if (!m_fileStream)
+		return 0;
+	m_dirty = true;
 	return length;
 }
 
@@ -205,14 +255,17 @@ FileStreamUnix::~FileStreamUnix()
 {
 	if (m_isValid)
 	{
+		if (m_dirty)
+			Flush();
 		m_fileStream.close();
+		m_isValid = false;
 	}
-	//	CloseHandle(m_hFile);
 }
 
 FileStreamUnix::FileStreamUnix(const fs::path& path, bool isOpen, bool isWriteable)
 {
 	fs::path CIPath = findPathCI(path);
+	m_path = CIPath;
 	if (isOpen)
 	{
 		m_fileStream.open(CIPath, isWriteable ? (std::ios_base::in | std::ios_base::out | std::ios_base::binary) : (std::ios_base::in | std::ios_base::binary));
@@ -228,6 +281,9 @@ FileStreamUnix::FileStreamUnix(const fs::path& path, bool isOpen, bool isWriteab
 		m_isValid = false;
 		m_fileStream.close();
 	}
+	// Creating a file truncates it in the kernel. That change still has to be committed.
+	if (m_isValid && !isOpen)
+		m_dirty = true;
 }
 
 void FileStreamUnix::SyncReadWriteSeek(bool nextOpIsWrite)

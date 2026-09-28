@@ -183,13 +183,9 @@ FileStreamAndroid* FileStreamAndroid::createFile2(const fs::path& path)
 
 	auto fileStream = FileStreamUnix::createFile2(path);
 	if (fileStream == nullptr)
-	{
 		return nullptr;
-	}
 
-	IFileStream* adapter = new FileStreamAdapter(FileStreamUnix::createFile2(path));
-
-	return new FileStreamAndroid(adapter);
+	return new FileStreamAndroid(new FileStreamAdapter(fileStream));
 }
 
 std::optional<std::vector<uint8>> FileStreamAndroid::LoadIntoMemory(const fs::path& path)
