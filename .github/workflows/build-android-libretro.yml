@@ -1,0 +1,100 @@
+name: Build and Release Android Libretro Core
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag Name (e.g. v0.1.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: "clear;nuget,GitHub,readwrite"
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+
+jobs:
+  build-android-arm64:
+    name: Build Android arm64-v8a Libretro Core
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ninja-build cmake gettext zip
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Setup vcpkg binary cache
+        uses: ./.github/actions/set-up-vcpkg-binary-cache-action
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Build Android Libretro Core
+        run: |
+          chmod +x build_libretro_android.sh
+          ./build_libretro_android.sh Release
+
+      - name: Package Core Artifacts
+        id: package
+        run: |
+          mkdir -p release_artifacts
+          
+          # The core output file
+          CORE_BIN="build_libretro_android_arm64/src/libretro/cemu_libretro.so"
+          if [ ! -f "$CORE_BIN" ]; then
+            CORE_BIN="build_libretro_android_arm64/src/libretro/libcemu_libretro_android.so"
+          fi
+          
+          # Copy as standard Android naming
+          cp "$CORE_BIN" release_artifacts/libcemu_libretro_android.so
+          
+          # Also package as zip for libretro buildbot convention
+          cd release_artifacts
+          zip -9 libcemu_libretro_android.so.zip libcemu_libretro_android.so
+          sha256sum libcemu_libretro_android.so > libcemu_libretro_android.so.sha256
+          cd ..
+          
+          # Determine release tag
+          if [ -n "${{ inputs.tag_name }}" ]; then
+            TAG="${{ inputs.tag_name }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cemu-libretro-android-arm64
+          path: release_artifacts/*
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.tag_name != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: "Cemu Libretro Android ${{ steps.package.outputs.tag }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release_artifacts/libcemu_libretro_android.so
+            release_artifacts/libcemu_libretro_android.so.zip
+            release_artifacts/libcemu_libretro_android.so.sha256
