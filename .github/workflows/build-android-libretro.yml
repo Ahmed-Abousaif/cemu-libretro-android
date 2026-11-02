@@ -9,10 +9,11 @@ on:
       tag_name:
         description: 'Release Tag Name (e.g. v0.1.0)'
         required: false
-        default: ''
+        default: 'v0.1.0'
 
 permissions:
   contents: write
+  packages: write
 
 env:
   VCPKG_ROOT: "${{ github.workspace }}/dependencies/vcpkg"
@@ -34,7 +35,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ninja-build cmake gettext zip
+          sudo apt-get install -y ninja-build cmake gettext zip mono-complete
 
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
@@ -62,6 +63,14 @@ jobs:
             CORE_BIN="build_libretro_android_arm64/src/libretro/libcemu_libretro_android.so"
           fi
           
+          if [ ! -f "$CORE_BIN" ]; then
+            echo "ERROR: Could not find compiled core binary at $CORE_BIN"
+            find build_libretro_android_arm64/ -name "*.so"
+            exit 1
+          fi
+
+          echo "Found core binary: $CORE_BIN"
+          
           # Copy as standard Android naming
           cp "$CORE_BIN" release_artifacts/libcemu_libretro_android.so
           
@@ -74,8 +83,10 @@ jobs:
           # Determine release tag
           if [ -n "${{ inputs.tag_name }}" ]; then
             TAG="${{ inputs.tag_name }}"
-          else
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v0.1.0"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -93,6 +104,7 @@ jobs:
           name: "Cemu Libretro Android ${{ steps.package.outputs.tag }}"
           draft: false
           prerelease: false
+          make_latest: "true"
           generate_release_notes: true
           files: |
             release_artifacts/libcemu_libretro_android.so
