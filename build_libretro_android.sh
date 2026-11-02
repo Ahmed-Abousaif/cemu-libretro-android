@@ -12,16 +12,19 @@ if [ -z "$ANDROID_NDK_HOME" ]; then
     exit 1
 fi
 
+git config --global --add safe.directory "*" || true
+
 apply_patch() {
     local repo="$1"
     local patch="$2"
-    if git -C "$repo" apply --check "$patch" 2>/dev/null; then
-        git -C "$repo" apply "$patch"
+    if git -C "$repo" apply --ignore-whitespace --ignore-space-change --check "$patch" 2>/dev/null; then
+        git -C "$repo" apply --ignore-whitespace --ignore-space-change "$patch"
         echo "Applied $(basename "$patch")"
-    elif git -C "$repo" apply --reverse --check "$patch" 2>/dev/null; then
-        :
+    elif git -C "$repo" apply --ignore-whitespace --ignore-space-change --reverse --check "$patch" 2>/dev/null; then
+        echo "Patch $(basename "$patch") is already applied"
     else
-        echo "ERROR: $patch does not match $repo"
+        echo "ERROR: $patch does not match $repo. Verbose output:"
+        git -C "$repo" apply -v --ignore-whitespace --ignore-space-change "$patch" || true
         exit 1
     fi
 }
