@@ -62,6 +62,24 @@ cmake -S . -B "$BUILD_DIR" \
 
 cmake --build "$BUILD_DIR" --target cemu_libretro -j$(nproc 2>/dev/null || echo 4)
 
+CORE_FILE="$BUILD_DIR/src/libretro/cemu_libretro.so"
+if [ ! -f "$CORE_FILE" ]; then
+    CORE_FILE="$BUILD_DIR/src/libretro/libcemu_libretro_android.so"
+fi
+
+# Strip debug symbols to reduce size from ~226MB to ~21MB
+STRIP_TOOL=$(find "$ANDROID_NDK_HOME" -name "llvm-strip" 2>/dev/null | head -n 1)
+if [ -n "$STRIP_TOOL" ] && [ -x "$STRIP_TOOL" ]; then
+    echo "Stripping debug symbols using $STRIP_TOOL..."
+    "$STRIP_TOOL" --strip-unneeded "$CORE_FILE"
+elif command -v llvm-strip &>/dev/null; then
+    echo "Stripping debug symbols using system llvm-strip..."
+    llvm-strip --strip-unneeded "$CORE_FILE"
+elif command -v strip &>/dev/null; then
+    echo "Stripping debug symbols using system strip..."
+    strip --strip-unneeded "$CORE_FILE"
+fi
+
 echo ""
 echo "=== Build Complete! ==="
-echo "Core library: $BUILD_DIR/src/libretro/cemu_libretro.so"
+echo "Core library: $CORE_FILE"

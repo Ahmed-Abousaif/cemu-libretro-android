@@ -71,6 +71,15 @@ jobs:
 
           echo "Found core binary: $CORE_BIN"
           
+          # Strip debug symbols to reduce size from ~226MB to ~21MB
+          STRIP_TOOL=$(find "$ANDROID_NDK_HOME" -name "llvm-strip" 2>/dev/null | head -n 1)
+          if [ -n "$STRIP_TOOL" ] && [ -x "$STRIP_TOOL" ]; then
+            echo "Stripping debug symbols from $CORE_BIN using $STRIP_TOOL..."
+            "$STRIP_TOOL" --strip-unneeded "$CORE_BIN"
+          elif command -v llvm-strip &>/dev/null; then
+            llvm-strip --strip-unneeded "$CORE_BIN"
+          fi
+
           # Copy as standard Android naming
           cp "$CORE_BIN" release_artifacts/libcemu_libretro_android.so
           
