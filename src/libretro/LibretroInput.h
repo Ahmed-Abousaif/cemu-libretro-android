@@ -5,6 +5,8 @@
 #include "input/emulated/WPADController.h"
 #include "libretro.h"
 
+#include <mutex>
+
 namespace Libretro
 {
 	void SetInputPollCallback(retro_input_poll_t cb);
@@ -26,16 +28,14 @@ namespace Libretro
 		ControllerState raw_state() override;
 
 		bool has_position() override { return m_port == 0; }
-		glm::vec2 get_position() override { return m_touch_pos; }
-		PositionVisibility GetPositionVisibility() override
-		{
-			return m_touch_active ? PositionVisibility::FULL : PositionVisibility::NONE;
-		}
+		glm::vec2 get_position() override;
+		PositionVisibility GetPositionVisibility() override;
 
 		void UpdateState();
 
 	private:
 		unsigned m_port;
+		mutable std::mutex m_stateMutex;
 		ControllerState m_state;
 		glm::vec2 m_touch_pos{0.0f, 0.0f};
 		bool m_touch_active = false;

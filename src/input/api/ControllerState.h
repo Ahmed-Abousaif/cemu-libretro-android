@@ -15,12 +15,25 @@ struct ControllerButtonState
 	ControllerButtonState() = default;
 	ControllerButtonState(const ControllerButtonState& other)
 	{
+		// Must lock: Android/libretro update button state on one thread while
+		// VPADRead copies ControllerState on the Cafe thread.
+		std::lock_guard _l(other.m_spinlock);
 		this->m_pressedButtons = other.m_pressedButtons;
 	}
 
 	ControllerButtonState(ControllerButtonState&& other)
 	{
+		std::scoped_lock _l(this->m_spinlock, other.m_spinlock);
 		this->m_pressedButtons = std::move(other.m_pressedButtons);
+	}
+
+	ControllerButtonState& operator=(const ControllerButtonState& other)
+	{
+		if (this == &other)
+			return *this;
+		std::scoped_lock _l(this->m_spinlock, other.m_spinlock);
+		this->m_pressedButtons = other.m_pressedButtons;
+		return *this;
 	}
 
 	void SetButtonState(uint32 buttonId, bool isPressed)

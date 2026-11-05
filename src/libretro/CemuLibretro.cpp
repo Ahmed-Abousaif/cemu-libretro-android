@@ -169,9 +169,13 @@ namespace Libretro::Cemu
 
 	void RunFrame()
 	{
+		// Poll at the start so Cafe's async VPAD reads see fresh state immediately,
+		// then again after audio drain so presses that arrived mid-frame (common when
+		// heavy 3D titles keep the frontend busy) still land before we return.
 		Libretro::PollInput();
 		Libretro::UpdateCoreOptions();
 		Libretro::DrainAudio();
+		Libretro::PollInput();
 		Libretro::PresentVulkanFrame();
 	}
 
