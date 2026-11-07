@@ -28,7 +28,8 @@ const ControllerState& ControllerBase::update_state()
 	ControllerState result = raw_state();
 
 	// ignore default buttons
-	result.buttons.UnsetButtons(m_default_state.buttons);
+	if (api() != InputAPI::Device)
+		result.buttons.UnsetButtons(m_default_state.buttons);
 	// apply deadzone and range and ignore default axis values
 	apply_axis_setting(result.axis, m_default_state.axis, m_settings.axis);
 	apply_axis_setting(result.rotation, m_default_state.rotation, m_settings.rotation);

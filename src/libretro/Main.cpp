@@ -35,8 +35,7 @@ unsigned retro_api_version(void)
 
 void retro_set_controller_port_device(unsigned port, unsigned device)
 {
-	(void)port;
-	(void)device;
+	Libretro::SetControllerPortDevice(port, device);
 }
 
 void retro_get_system_info(struct retro_system_info* info)
@@ -54,7 +53,7 @@ void retro_get_system_av_info(struct retro_system_av_info* info)
 	memset(info, 0, sizeof(*info));
 	info->geometry.base_width = DEFAULT_WIDTH;
 	info->geometry.base_height = DEFAULT_HEIGHT;
-	info->geometry.max_width = 1920;
+	info->geometry.max_width = 3840;
 	info->geometry.max_height = 1080;
 	info->geometry.aspect_ratio = 16.0f / 9.0f;
 
@@ -131,6 +130,8 @@ bool retro_load_game(const struct retro_game_info* info)
 		{0},
 	};
 	Libretro::EnvCb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
+
+	Libretro::UpdateCoreOptions();
 
 	// Setup Vulkan hardware rendering
 	if (!Libretro::SetupVulkanContext())

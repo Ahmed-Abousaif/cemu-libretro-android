@@ -25,6 +25,16 @@ namespace Libretro
 
 	bool DisplayMessage(const char* msg, unsigned frames = 180);
 
+	enum class ScreenViewMode
+	{
+		TV = 0,
+		Pad = 1,
+		SideBySide = 2,
+	};
+
+	ScreenViewMode GetScreenViewMode();
+	void SetScreenViewMode(ScreenViewMode mode);
+
 	void InitCoreOptions();
 	void UpdateCoreOptions();
 } // namespace Libretro

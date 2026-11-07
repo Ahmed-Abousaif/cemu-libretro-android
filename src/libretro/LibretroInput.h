@@ -14,6 +14,7 @@ namespace Libretro
 
 	void InitializeInput();
 	void PollInput();
+	void SetControllerPortDevice(unsigned port, unsigned device);
 
 	class LibretroController : public ControllerBase
 	{
@@ -27,7 +28,11 @@ namespace Libretro
 		bool is_connected() override { return true; }
 		ControllerState raw_state() override;
 
-		bool has_position() override { return m_port == 0; }
+		bool has_position() override
+		{
+			std::lock_guard lock(m_stateMutex);
+			return m_port == 0 && m_touch_active;
+		}
 		glm::vec2 get_position() override;
 		PositionVisibility GetPositionVisibility() override;
 

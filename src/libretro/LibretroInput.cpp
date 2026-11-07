@@ -1,8 +1,12 @@
 #include "LibretroInput.h"
+#include "Cafe/OS/libs/swkbd/swkbd.h"
+#include "Environment.h"
 #include "input/InputManager.h"
 #include "Common/precompiled.h"
 #include <vector>
 #include <memory>
+#include <algorithm>
+#include <mutex>
 
 namespace Libretro
 {
@@ -52,8 +56,6 @@ namespace Libretro
 		if (!s_input_state_cb)
 			return;
 
-		// Build the next snapshot lock-free against the frontend callbacks, then
-		// publish atomically so Cafe VPADRead never observes a torn pad state.
 		ControllerState next{};
 		bool touch_active = false;
 		glm::vec2 touch_pos{0.0f, 0.0f};
@@ -99,15 +101,66 @@ namespace Libretro
 		if (m_port == 0)
 		{
 			int16_t touch_pressed = s_input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED);
-			touch_active = (touch_pressed != 0);
-			if (touch_active)
+			if (touch_pressed)
 			{
 				int16_t px = s_input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
 				int16_t py = s_input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
 				// Normalized from [-0x7fff, 0x7fff] to [0.0, 1.0]
 				float norm_x = (static_cast<float>(px) + 32767.0f) / 65534.0f;
 				float norm_y = (static_cast<float>(py) + 32767.0f) / 65534.0f;
-				touch_pos = glm::vec2(norm_x * 1280.0f, norm_y * 720.0f);
+
+				ScreenViewMode screenMode = GetScreenViewMode();
+				if (screenMode == ScreenViewMode::SideBySide)
+				{
+					// Side-by-Side: Left half [0.0..0.5] is TV, Right half [0.5..1.0] is GamePad
+					if (norm_x >= 0.5f)
+					{
+						float pad_x = (norm_x - 0.5f) * 2.0f;
+						touch_pos = glm::vec2(std::clamp(pad_x, 0.0f, 1.0f), std::clamp(norm_y, 0.0f, 1.0f));
+						touch_active = true;
+					}
+					else
+					{
+						touch_active = false;
+					}
+				}
+				else
+				{
+					// Pad view or TV view fallback: map full viewport
+					touch_pos = glm::vec2(std::clamp(norm_x, 0.0f, 1.0f), std::clamp(norm_y, 0.0f, 1.0f));
+					touch_active = true;
+				}
+			}
+			else
+			{
+				touch_active = false;
+			}
+		}
+
+		if (m_port == 0 && swkbd::hasKeyboardInputHook())
+		{
+			static bool s_enter_down = false;
+			if (s_input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START) ||
+			    s_input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))
+			{
+				if (!s_enter_down)
+				{
+					s_enter_down = true;
+					swkbd::keyInput(swkbd::RETURN_KEYCODE);
+				}
+			}
+			else
+			{
+				s_enter_down = false;
+			}
+		}
+
+		if (!next.buttons.IsIdle())
+		{
+			static uint32 s_log_cooldown = 0;
+			if (++s_log_cooldown % 60 == 1)
+			{
+				cemuLog_log(LogType::Force, "Libretro Pad %u active buttons", m_port);
 			}
 		}
 
@@ -120,27 +173,87 @@ namespace Libretro
 	void InitializeInput()
 	{
 		s_controllers.clear();
+		s_controllers.reserve(4);
+
 		for (unsigned i = 0; i < 4; ++i)
 		{
 			auto ctrl = std::make_shared<LibretroController>(i);
 			s_controllers.push_back(ctrl);
+		}
 
-			if (i == 0)
+		// Port 0 defaults to GamePad (VPAD channel 0)
+		auto vpad = InputManager::instance().set_controller(0, EmulatedController::VPAD);
+		if (vpad && !s_controllers.empty())
+		{
+			vpad->clear_controllers();
+			vpad->add_controller(s_controllers[0]);
+			vpad->set_default_mapping(s_controllers[0]);
+		}
+
+		// Ports 1..3 default to Pro Controllers
+		for (unsigned i = 1; i < 4; ++i)
+		{
+			auto pro = InputManager::instance().set_controller(i, EmulatedController::Pro);
+			if (pro && i < s_controllers.size())
 			{
-				auto emulated = InputManager::instance().set_controller(0, EmulatedController::VPAD);
-				if (emulated)
+				pro->clear_controllers();
+				pro->add_controller(s_controllers[i]);
+				pro->set_default_mapping(s_controllers[i]);
+			}
+		}
+	}
+
+	void SetControllerPortDevice(unsigned port, unsigned device)
+	{
+		if (port >= 4)
+			return;
+
+		Libretro::LogInfo("SetControllerPortDevice: port %u, device %u", port, device);
+
+		if (port == 0)
+		{
+			if (device == RETRO_DEVICE_NONE)
+			{
+				InputManager::instance().delete_controller(0, false, EmulatedController::VPAD);
+				InputManager::instance().delete_controller(0, false, EmulatedController::Pro);
+			}
+			else if (device == RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 1)) // 257 = Wii U Pro Controller
+			{
+				InputManager::instance().delete_controller(0, false, EmulatedController::VPAD);
+				auto pro = InputManager::instance().set_controller(0, EmulatedController::Pro);
+				if (pro && !s_controllers.empty() && s_controllers[0])
 				{
-					emulated->add_controller(ctrl);
-					emulated->set_default_mapping(ctrl);
+					pro->clear_controllers();
+					pro->add_controller(s_controllers[0]);
+					pro->set_default_mapping(s_controllers[0]);
 				}
+			}
+			else // RETRO_DEVICE_JOYPAD (1) = Wii U GamePad
+			{
+				InputManager::instance().delete_controller(0, false, EmulatedController::Pro);
+				auto vpad = InputManager::instance().set_controller(0, EmulatedController::VPAD);
+				if (vpad && !s_controllers.empty() && s_controllers[0])
+				{
+					vpad->clear_controllers();
+					vpad->add_controller(s_controllers[0]);
+					vpad->set_default_mapping(s_controllers[0]);
+				}
+			}
+		}
+		else
+		{
+			if (device == RETRO_DEVICE_NONE)
+			{
+				InputManager::instance().delete_controller(port, false, EmulatedController::Pro);
 			}
 			else
 			{
-				auto emulated = InputManager::instance().set_controller(i, EmulatedController::Pro);
-				if (emulated)
+				auto pro = InputManager::instance().set_controller(port, EmulatedController::Pro);
+				if (pro && port < s_controllers.size() && s_controllers[port])
 				{
-					emulated->add_controller(ctrl);
-					emulated->set_default_mapping(ctrl);
+					pro->clear_controllers();
+					pro->add_controller(s_controllers[port]);
+					pro->set_default_mapping(s_controllers[port]);
 				}
 			}
 		}

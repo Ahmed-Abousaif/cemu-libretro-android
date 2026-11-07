@@ -57,7 +57,7 @@ foreach ($name in $patchMap.Keys) {
         if ($LASTEXITCODE -ne 0) { throw "Patch $name does not match $repo" }
     }
 }
-$vcpkgPath = (Resolve-Path "dependencies\vcpkg").Path
+$vcpkgPath = (Resolve-Path (Join-Path $PSScriptRoot "dependencies\vcpkg")).Path
 $env:VCPKG_ROOT = $vcpkgPath
 [Environment]::SetEnvironmentVariable("VCPKG_ROOT", $vcpkgPath, "Process")
 
@@ -100,9 +100,9 @@ Remove-Item $buildBat -ErrorAction SilentlyContinue
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`n=== Build Successful! ===" -ForegroundColor Green
-    $builtSo = "$BuildDir/src/libretro/libcemu_libretro.so"
+    $builtSo = Join-Path $PSScriptRoot "$BuildDir/src/libretro/libcemu_libretro.so"
     if (-not (Test-Path $builtSo)) {
-        $builtSo = "$BuildDir/src/libretro/cemu_libretro.so"
+        $builtSo = Join-Path $PSScriptRoot "$BuildDir/src/libretro/cemu_libretro.so"
     }
     Write-Host "Output: $builtSo"
     $targetJni = "d:\Work\Omnidroid\omnidroid-cores\omnidroid_core_cemu\src\main\jniLibs\arm64-v8a\libcemu_libretro_android.so"

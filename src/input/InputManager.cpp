@@ -574,7 +574,7 @@ bool InputManager::is_gameprofile_set(size_t player_index) const
 
 EmulatedControllerPtr InputManager::set_controller(EmulatedControllerPtr controller)
 {
-	auto prev_controller = delete_controller(controller->player_index());
+	auto prev_controller = delete_controller(controller->player_index(), false, controller->type());
 
 	// assign controllers to new emulated controller if empty
 	if (prev_controller && controller->get_controllers().empty())
@@ -667,45 +667,53 @@ EmulatedControllerPtr InputManager::get_controller(size_t player_index) const
 	return {};
 }
 
-EmulatedControllerPtr InputManager::delete_controller(size_t player_index, bool delete_profile)
+EmulatedControllerPtr InputManager::delete_controller(size_t player_index, bool delete_profile, std::optional<EmulatedController::Type> type)
 {
 	std::scoped_lock lock(m_mutex);
-	for (auto& controller : m_vpad)
+	if (!type.has_value() || type.value() == EmulatedController::Type::VPAD)
 	{
-		auto result = controller;
-		if (result && result->player_index() == player_index)
+		for (auto& controller : m_vpad)
 		{
-			controller = {};
-
-			if(delete_profile)
+			auto result = controller;
+			if (result && result->player_index() == player_index)
 			{
-				std::error_code ec{};
-				fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.xml", player_index), ec);
-				fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.txt", player_index), ec);
-			}
+				controller = {};
 
-			return result;
+				if(delete_profile)
+				{
+					std::error_code ec{};
+					fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.xml", player_index), ec);
+					fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.txt", player_index), ec);
+				}
+
+				return result;
+			}
 		}
 	}
 
-	for (auto& controller : m_wpad)
+	if (!type.has_value() || type.value() != EmulatedController::Type::VPAD)
 	{
-		auto result = controller;
-		if (result && result->player_index() == player_index)
+		for (auto& controller : m_wpad)
 		{
-			controller = {};
+			auto result = controller;
+			if (result && result->player_index() == player_index)
+			{
+				controller = {};
 
-			std::error_code ec{};
-			fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.xml", player_index), ec);
-			fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.txt", player_index), ec);
+				if(delete_profile)
+				{
+					std::error_code ec{};
+					fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.xml", player_index), ec);
+					fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/controller{}.txt", player_index), ec);
+				}
 
-			return result;
+				return result;
+			}
 		}
 	}
 
 	return {};
 }
-
 
 std::shared_ptr<VPADController> InputManager::get_vpad_controller(size_t index) const
 {

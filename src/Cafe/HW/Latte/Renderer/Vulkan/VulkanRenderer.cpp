@@ -26,6 +26,7 @@
 
 #include "Cafe/TitleList/GameInfo.h"
 #include "libretro/LibretroVulkan.h"
+#include "libretro/Environment.h"
 
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
@@ -990,7 +991,7 @@ void VulkanRenderer::StopUsingPadAndWait()
 
 bool VulkanRenderer::IsPadWindowActive()
 {
-	return IsSwapchainInfoValid(false);
+	return IsSwapchainInfoValid(false) || (Libretro::vulkan_iface != nullptr);
 }
 
 void VulkanRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool padView)
@@ -3507,11 +3508,11 @@ bool VulkanRenderer::EnsureLibretroOutput(uint32 index, uint32 width, uint32 hei
 	return true;
 }
 
-bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk)
+bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk, bool isPad)
 {
 	if (!texViewVk || !m_state.currentCommandBuffer || !Libretro::vulkan_iface)
 		return false;
-	draw_endRenderPass();
+
 	LatteTextureVk* baseImageTex = texViewVk->GetBaseImage();
 	if (!baseImageTex || !baseImageTex->GetImageObj())
 		return false;
@@ -3522,6 +3523,53 @@ bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk)
 	if (srcWidth <= 0 || srcHeight <= 0)
 		return false;
 
+	// Cache latest texture info for seamless instant switching
+	if (!isPad)
+	{
+		m_lastTVTexture.texture = baseImageTex;
+		m_lastTVTexture.layer = (uint32)texViewVk->firstSlice;
+		m_lastTVTexture.width = srcWidth;
+		m_lastTVTexture.height = srcHeight;
+	}
+	else
+	{
+		m_lastPadTexture.texture = baseImageTex;
+		m_lastPadTexture.layer = (uint32)texViewVk->firstSlice;
+		m_lastPadTexture.width = srcWidth;
+		m_lastPadTexture.height = srcHeight;
+	}
+
+	Libretro::ScreenViewMode mode = Libretro::GetScreenViewMode();
+
+	// In TV mode, if Pad arrives and we already have TV, skip redundant blit
+	if (mode == Libretro::ScreenViewMode::TV && isPad && m_lastTVTexture.texture)
+		return true;
+
+	draw_endRenderPass();
+
+	static uint32 s_lastTVHeight = 720;
+	if (m_lastTVTexture.height > 0)
+		s_lastTVHeight = (uint32)m_lastTVTexture.height;
+
+	uint32 outWidth = 1280;
+	uint32 outHeight = 720;
+
+	if (mode == Libretro::ScreenViewMode::SideBySide)
+	{
+		outHeight = (s_lastTVHeight > 0) ? s_lastTVHeight : 720;
+		outWidth = outHeight * 32 / 9;
+	}
+	else if (mode == Libretro::ScreenViewMode::Pad)
+	{
+		outHeight = (s_lastTVHeight > 0) ? s_lastTVHeight : 720;
+		outWidth = outHeight * 16 / 9;
+	}
+	else // TV
+	{
+		outWidth = (m_lastTVTexture.width > 0) ? (uint32)m_lastTVTexture.width : 1280;
+		outHeight = (m_lastTVTexture.height > 0) ? (uint32)m_lastTVTexture.height : 720;
+	}
+
 	uint32 index = 0;
 	if (Libretro::vulkan_iface->get_sync_index)
 		index = Libretro::vulkan_iface->get_sync_index(Libretro::vulkan_iface->handle);
@@ -3529,26 +3577,11 @@ bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk)
 		index = index % kLibretroOutputImages;
 	if (Libretro::vulkan_iface->wait_sync_index)
 		Libretro::vulkan_iface->wait_sync_index(Libretro::vulkan_iface->handle);
-	if (!EnsureLibretroOutput(index, (uint32)srcWidth, (uint32)srcHeight))
+
+	if (!EnsureLibretroOutput(index, outWidth, outHeight))
 		return false;
 
 	auto& output = m_libretroOutputs[index];
-	baseImageTex->GetImageObj()->flagForCurrentCommandBuffer();
-
-	VkImageSubresourceLayers layers{};
-	layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	layers.mipLevel = 0;
-	layers.baseArrayLayer = (uint32)texViewVk->firstSlice;
-	layers.layerCount = 1;
-
-	VkImageSubresourceRange srcRange{};
-	srcRange.aspectMask = layers.aspectMask;
-	srcRange.baseMipLevel = 0;
-	srcRange.levelCount = 1;
-	srcRange.baseArrayLayer = layers.baseArrayLayer;
-	srcRange.layerCount = 1;
-	const VkImageLayout oldLayout = baseImageTex->GetImageLayout(srcRange);
-	barrier_image<IMAGE_READ | IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(baseImageTex, layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
 	VkImageSubresourceRange dstRange{};
 	dstRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -3558,37 +3591,99 @@ bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk)
 	dstRange.layerCount = 1;
 	barrier_image<TRANSFER_READ, TRANSFER_WRITE>(output.image, dstRange, output.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	VkImageBlit region{};
-	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.srcSubresource.mipLevel = 0;
-	region.srcSubresource.baseArrayLayer = layers.baseArrayLayer;
-	region.srcSubresource.layerCount = 1;
-	region.srcOffsets[1] = {srcWidth, srcHeight, 1};
-	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.dstSubresource.mipLevel = 0;
-	region.dstSubresource.baseArrayLayer = 0;
-	region.dstSubresource.layerCount = 1;
-	region.dstOffsets[1] = {srcWidth, srcHeight, 1};
-	vkCmdBlitImage(
-		m_state.currentCommandBuffer,
-		baseImageTex->GetImageObj()->m_image,
-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		output.image,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1,
-		&region,
-		VK_FILTER_NEAREST);
+	auto blitSingle = [&](LatteTextureVk* tex, uint32 layer, int w, int h, int dstX0, int dstX1, int dstY0, int dstY1) {
+		if (!tex || !tex->GetImageObj()) return;
+		tex->GetImageObj()->flagForCurrentCommandBuffer();
+
+		VkImageSubresourceLayers layers{};
+		layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		layers.mipLevel = 0;
+		layers.baseArrayLayer = layer;
+		layers.layerCount = 1;
+
+		VkImageSubresourceRange srcRange{};
+		srcRange.aspectMask = layers.aspectMask;
+		srcRange.baseMipLevel = 0;
+		srcRange.levelCount = 1;
+		srcRange.baseArrayLayer = layer;
+		srcRange.layerCount = 1;
+		const VkImageLayout oldLayout = tex->GetImageLayout(srcRange);
+		barrier_image<IMAGE_READ | IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(tex, layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+		VkImageBlit region{};
+		region.srcSubresource = layers;
+		region.srcOffsets[0] = {0, 0, 0};
+		region.srcOffsets[1] = {w, h, 1};
+
+		region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.dstSubresource.mipLevel = 0;
+		region.dstSubresource.baseArrayLayer = 0;
+		region.dstSubresource.layerCount = 1;
+		region.dstOffsets[0] = {dstX0, dstY0, 0};
+		region.dstOffsets[1] = {dstX1, dstY1, 1};
+
+		vkCmdBlitImage(
+			m_state.currentCommandBuffer,
+			tex->GetImageObj()->m_image,
+			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			output.image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			1,
+			&region,
+			VK_FILTER_LINEAR);
+
+		barrier_image<TRANSFER_READ, IMAGE_READ | IMAGE_WRITE>(tex, layers, oldLayout);
+	};
+
+	if (mode == Libretro::ScreenViewMode::SideBySide)
+	{
+		if (!m_lastTVTexture.texture || !m_lastPadTexture.texture)
+		{
+			VkClearColorValue black{};
+			vkCmdClearColorImage(m_state.currentCommandBuffer, output.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &dstRange);
+		}
+
+		int midX = (int)(outWidth / 2);
+		// Left: TV
+		if (!isPad)
+			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, midX, 0, (int)outHeight);
+		else if (m_lastTVTexture.texture)
+			blitSingle(m_lastTVTexture.texture, m_lastTVTexture.layer, m_lastTVTexture.width, m_lastTVTexture.height, 0, midX, 0, (int)outHeight);
+
+		// Right: GamePad
+		if (isPad)
+			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, midX, (int)outWidth, 0, (int)outHeight);
+		else if (m_lastPadTexture.texture)
+			blitSingle(m_lastPadTexture.texture, m_lastPadTexture.layer, m_lastPadTexture.width, m_lastPadTexture.height, midX, (int)outWidth, 0, (int)outHeight);
+	}
+	else if (mode == Libretro::ScreenViewMode::Pad)
+	{
+		if (isPad)
+			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
+		else if (m_lastPadTexture.texture)
+			blitSingle(m_lastPadTexture.texture, m_lastPadTexture.layer, m_lastPadTexture.width, m_lastPadTexture.height, 0, (int)outWidth, 0, (int)outHeight);
+		else
+			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
+	}
+	else // TV
+	{
+		if (!isPad)
+			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
+		else if (m_lastTVTexture.texture)
+			blitSingle(m_lastTVTexture.texture, m_lastTVTexture.layer, m_lastTVTexture.width, m_lastTVTexture.height, 0, (int)outWidth, 0, (int)outHeight);
+		else
+			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
+	}
 
 	barrier_image<TRANSFER_WRITE, IMAGE_READ>(output.image, dstRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	output.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	barrier_image<TRANSFER_READ, IMAGE_READ | IMAGE_WRITE>(baseImageTex, layers, oldLayout);
 
 	Libretro::SetVulkanImage(
 		output.view,
 		output.image,
 		VK_FORMAT_R8G8B8A8_UNORM,
-		(uint32)srcWidth,
-		(uint32)srcHeight,
+		outWidth,
+		outHeight,
 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		output.semaphore);
 	m_libretroPendingIndex = (int)index;
@@ -3597,9 +3692,9 @@ bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk)
 
 void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
-	if (!padView && texView && !IsSwapchainInfoValid(true))
+	if (texView && !IsSwapchainInfoValid(true))
 	{
-		if (!BlitLibretroOutput(static_cast<LatteTextureViewVk*>(texView)))
+		if (!BlitLibretroOutput(static_cast<LatteTextureViewVk*>(texView), padView))
 		{
 			static bool s_loggedBlitFailure = false;
 			if (!s_loggedBlitFailure)

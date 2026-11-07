@@ -474,6 +474,12 @@ sint32 _KPADRead(uint32 channel, KPADStatus_t* samplingBufs, uint32 length, bety
 	{
 		const auto btn_repeat = padscore::g_padscore.controller_data[channel].btn_repeat;
 		controller->KPADRead(*samplingBufs, btn_repeat);
+		if (samplingBufs->ex_status.uc.hold != 0 || samplingBufs->hold != 0)
+		{
+			static uint32 s_kpad_log = 0;
+			if (++s_kpad_log % 30 == 1)
+				cemuLog_log(LogType::Force, "KPADRead ch{} hold=0x{:08X}", channel, (uint32)samplingBufs->ex_status.uc.hold);
+		}
 	}
 
 	if (errResult)

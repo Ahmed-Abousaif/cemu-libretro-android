@@ -1,7 +1,9 @@
 #include "Environment.h"
+#include "Cafe/OS/libs/swkbd/swkbd.h"
 #include <cstdarg>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include "config/ActiveSettings.h"
 #include "config/CemuConfig.h"
 
@@ -14,7 +16,42 @@ namespace Libretro
 	{
 		static retro_environment_t environ_cb = nullptr;
 		static retro_log_printf_t log_cb = nullptr;
+		#include <atomic>
+		static std::atomic<ScreenViewMode> s_screenViewMode{ScreenViewMode::TV};
 	} // namespace
+
+	ScreenViewMode GetScreenViewMode()
+	{
+		return s_screenViewMode;
+	}
+
+	void SetScreenViewMode(ScreenViewMode mode)
+	{
+		if (s_screenViewMode == mode)
+			return;
+
+		s_screenViewMode = mode;
+		LogInfo("Screen view mode changed to: %s",
+			mode == ScreenViewMode::Pad ? "pad" :
+			mode == ScreenViewMode::SideBySide ? "side_by_side" : "tv");
+
+		struct retro_game_geometry geom{};
+		geom.max_width = 3840;
+		geom.max_height = 1080;
+		if (mode == ScreenViewMode::SideBySide)
+		{
+			geom.base_width = 2560;
+			geom.base_height = 720;
+			geom.aspect_ratio = 32.0f / 9.0f;
+		}
+		else
+		{
+			geom.base_width = 1280;
+			geom.base_height = 720;
+			geom.aspect_ratio = 16.0f / 9.0f;
+		}
+		EnvCb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+	}
 
 	bool EnvCb(unsigned cmd, void* data)
 	{
@@ -214,6 +251,18 @@ namespace Libretro
 				cfg.cpu_mode = CPUMode::SinglecoreInterpreter;
 		}
 
+		var.key = "cemu_screen_view";
+		if (EnvCb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		{
+			std::string_view val(var.value);
+			if (val == "pad" || val == "GamePad" || val == "gamepad")
+				SetScreenViewMode(ScreenViewMode::Pad);
+			else if (val == "side_by_side" || val == "Side by Side" || val == "Side-by-Side")
+				SetScreenViewMode(ScreenViewMode::SideBySide);
+			else
+				SetScreenViewMode(ScreenViewMode::TV);
+		}
+
 		var.key = "cemu_audio_volume";
 		if (EnvCb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
 		{
@@ -224,9 +273,26 @@ namespace Libretro
 	}
 } // namespace Libretro
 
+static void KeyboardCallback(bool down, unsigned keycode, uint32_t character, uint16_t key_modifiers)
+{
+	(void)key_modifiers;
+	if (down && swkbd::hasKeyboardInputHook())
+	{
+		if (keycode == RETROK_RETURN || keycode == RETROK_KP_ENTER)
+			swkbd::keyInput(swkbd::RETURN_KEYCODE);
+		else if (keycode == RETROK_BACKSPACE)
+			swkbd::keyInput(swkbd::BACKSPACE_KEYCODE);
+		else if (character >= 32 && character <= 126)
+			swkbd::keyInput(character);
+	}
+}
+
 void retro_set_environment(retro_environment_t cb)
 {
 	Libretro::environ_cb = cb;
+
+	struct retro_keyboard_callback kbcb{ KeyboardCallback };
+	cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &kbcb);
 
 	static const struct retro_controller_description controllers[] = {
 		{"Wii U GamePad", RETRO_DEVICE_JOYPAD},

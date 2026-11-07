@@ -286,6 +286,12 @@ namespace vpad
 				}
 			}
 			controller->VPADRead(*status, vpad::g_vpad.controller_data[channel].btn_repeat);
+			if (status->hold != 0)
+			{
+				static uint32 s_vpad_log = 0;
+				if (++s_vpad_log % 30 == 1)
+					cemuLog_log(LogType::Force, "VPADRead ch{} hold=0x{:08X}", channel, (uint32)status->hold);
+			}
 			if (error)
 				*error = VPAD_READ_ERR_NONE;
 			return 1;

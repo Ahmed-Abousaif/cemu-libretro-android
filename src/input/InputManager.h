@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 
 #if BOOST_OS_WINDOWS
 #include "input/api/DirectInput/DirectInputControllerProvider.h"
@@ -58,7 +59,7 @@ public:
 	EmulatedControllerPtr set_controller(size_t player_index, EmulatedController::Type type);
 	EmulatedControllerPtr set_controller(size_t player_index, EmulatedController::Type type, const std::shared_ptr<ControllerBase>& controller);
 
-	EmulatedControllerPtr delete_controller(size_t player_index, bool delete_profile = false);
+	EmulatedControllerPtr delete_controller(size_t player_index, bool delete_profile = false, std::optional<EmulatedController::Type> type = std::nullopt);
 	
 	EmulatedControllerPtr get_controller(size_t player_index) const;
 	std::shared_ptr<VPADController> get_vpad_controller(size_t index) const;
