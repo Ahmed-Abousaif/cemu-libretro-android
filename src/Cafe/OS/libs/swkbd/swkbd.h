@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "Cafe/OS/RPL/COSModule.h"
 
 namespace swkbd
@@ -21,6 +23,8 @@ namespace swkbd
 	void render(bool mainWindow);
 	bool hasKeyboardInputHook();
 	void keyInput(uint32 keyCode);
+	std::u16string getInputText();
+	void setInputText(const std::u16string& text);
 	void load();
 	COSModule* GetModule();
 

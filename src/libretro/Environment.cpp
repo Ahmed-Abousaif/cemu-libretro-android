@@ -1,4 +1,6 @@
 #include "Environment.h"
+#include "ScreenLayout.h"
+#include <atomic>
 #include "Cafe/OS/libs/swkbd/swkbd.h"
 #include <cstdarg>
 #include <cstdio>
@@ -16,8 +18,8 @@ namespace Libretro
 	{
 		static retro_environment_t environ_cb = nullptr;
 		static retro_log_printf_t log_cb = nullptr;
-		#include <atomic>
 		static std::atomic<ScreenViewMode> s_screenViewMode{ScreenViewMode::TV};
+		static std::atomic<bool> s_dualScreenStacked{true};
 	} // namespace
 
 	ScreenViewMode GetScreenViewMode()
@@ -25,24 +27,22 @@ namespace Libretro
 		return s_screenViewMode;
 	}
 
-	void SetScreenViewMode(ScreenViewMode mode)
+	bool IsDualScreenStacked()
 	{
-		if (s_screenViewMode == mode)
-			return;
+		return s_dualScreenStacked;
+	}
 
-		s_screenViewMode = mode;
-		LogInfo("Screen view mode changed to: %s",
-			mode == ScreenViewMode::Pad ? "pad" :
-			mode == ScreenViewMode::SideBySide ? "side_by_side" : "tv");
-
+	static void UpdateScreenGeometry(ScreenViewMode mode)
+	{
 		struct retro_game_geometry geom{};
-		geom.max_width = 3840;
-		geom.max_height = 1080;
+		geom.max_width = 7680;
+		geom.max_height = 3240;
 		if (mode == ScreenViewMode::SideBySide)
 		{
-			geom.base_width = 2560;
-			geom.base_height = 720;
-			geom.aspect_ratio = 32.0f / 9.0f;
+			const auto layout = ComputeDualScreenLayout(720, IsDualScreenStacked());
+			geom.base_width = layout.width;
+			geom.base_height = layout.height;
+			geom.aspect_ratio = (float)layout.width / layout.height;
 		}
 		else
 		{
@@ -51,6 +51,15 @@ namespace Libretro
 			geom.aspect_ratio = 16.0f / 9.0f;
 		}
 		EnvCb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+	}
+
+	void SetScreenViewMode(ScreenViewMode mode)
+	{
+		if (s_screenViewMode == mode) return;
+		s_screenViewMode = mode;
+		LogInfo("Screen view mode changed to: %s", mode == ScreenViewMode::Pad ? "pad" :
+			mode == ScreenViewMode::SideBySide ? "dual" : "tv");
+		UpdateScreenGeometry(mode);
 	}
 
 	bool EnvCb(unsigned cmd, void* data)
@@ -191,10 +200,21 @@ namespace Libretro
 				{
 					{"tv", "TV View"},
 					{"pad", "GamePad View"},
-					{"side_by_side", "Side by Side"},
+					{"side_by_side", "Dual View"},
 					{nullptr, nullptr},
 				},
 				"tv"
+			},
+			{
+				"cemu_dual_screen_layout",
+				"Dual Screen Layout",
+				"The frontend selects the layout for the current orientation.",
+				{
+					{"stacked", "TV above half-size GamePad"},
+					{"side_by_side", "Side by Side"},
+					{nullptr, nullptr},
+				},
+				"stacked"
 			},
 			{
 				"cemu_audio_volume",
@@ -226,6 +246,7 @@ namespace Libretro
 			static const struct retro_variable legacy_vars[] = {
 				{"cemu_cpu_mode", "CPU Mode; recompiler_multi|recompiler_dual|recompiler_single|interpreter"},
 				{"cemu_screen_view", "Screen View; tv|pad|side_by_side"},
+				{"cemu_dual_screen_layout", "Dual Screen Layout; stacked|side_by_side"},
 				{"cemu_audio_volume", "Volume; 100|80|60|40|20|0"},
 				{nullptr, nullptr}
 			};
@@ -249,6 +270,14 @@ namespace Libretro
 				cfg.cpu_mode = CPUMode::SinglecoreRecompiler;
 			else
 				cfg.cpu_mode = CPUMode::SinglecoreInterpreter;
+		}
+
+		var.key = "cemu_dual_screen_layout";
+		if (EnvCb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		{
+			const bool stacked = std::string_view(var.value) != "side_by_side";
+			if (s_dualScreenStacked.exchange(stacked) != stacked && GetScreenViewMode() == ScreenViewMode::SideBySide)
+				UpdateScreenGeometry(GetScreenViewMode());
 		}
 
 		var.key = "cemu_screen_view";

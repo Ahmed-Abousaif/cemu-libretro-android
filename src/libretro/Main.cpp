@@ -53,8 +53,8 @@ void retro_get_system_av_info(struct retro_system_av_info* info)
 	memset(info, 0, sizeof(*info));
 	info->geometry.base_width = DEFAULT_WIDTH;
 	info->geometry.base_height = DEFAULT_HEIGHT;
-	info->geometry.max_width = 3840;
-	info->geometry.max_height = 1080;
+	info->geometry.max_width = 7680;
+	info->geometry.max_height = 3240;
 	info->geometry.aspect_ratio = 16.0f / 9.0f;
 
 	info->timing.fps = DEFAULT_FPS;

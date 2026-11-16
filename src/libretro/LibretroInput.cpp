@@ -1,6 +1,8 @@
 #include "LibretroInput.h"
+#include "LibretroKeyboard.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
 #include "Environment.h"
+#include "ScreenLayout.h"
 #include "input/InputManager.h"
 #include "Common/precompiled.h"
 #include <vector>
@@ -112,21 +114,13 @@ namespace Libretro
 				ScreenViewMode screenMode = GetScreenViewMode();
 				if (screenMode == ScreenViewMode::SideBySide)
 				{
-					// Side-by-Side: Left half [0.0..0.5] is TV, Right half [0.5..1.0] is GamePad
-					if (norm_x >= 0.5f)
-					{
-						float pad_x = (norm_x - 0.5f) * 2.0f;
-						touch_pos = glm::vec2(std::clamp(pad_x, 0.0f, 1.0f), std::clamp(norm_y, 0.0f, 1.0f));
-						touch_active = true;
-					}
-					else
-					{
-						touch_active = false;
-					}
+					float pad_x = 0.0f, pad_y = 0.0f;
+					const auto layout = ComputeDualScreenLayout(720, IsDualScreenStacked());
+					touch_active = MapGamePadTouch(layout, norm_x, norm_y, pad_x, pad_y);
+					if (touch_active) touch_pos = glm::vec2(pad_x, pad_y);
 				}
-				else
+				else if (screenMode == ScreenViewMode::Pad)
 				{
-					// Pad view or TV view fallback: map full viewport
 					touch_pos = glm::vec2(std::clamp(norm_x, 0.0f, 1.0f), std::clamp(norm_y, 0.0f, 1.0f));
 					touch_active = true;
 				}
@@ -137,7 +131,7 @@ namespace Libretro
 			}
 		}
 
-		if (m_port == 0 && swkbd::hasKeyboardInputHook())
+		if (m_port == 0 && swkbd::hasKeyboardInputHook() && !HasNativeSoftwareKeyboard())
 		{
 			static bool s_enter_down = false;
 			if (s_input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START) ||
