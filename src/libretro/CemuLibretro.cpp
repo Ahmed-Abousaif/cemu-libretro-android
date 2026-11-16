@@ -2,6 +2,7 @@
 #include "Environment.h"
 #include "LibretroAudio.h"
 #include "LibretroInput.h"
+#include "LibretroKeyboard.h"
 #include "LibretroVulkan.h"
 
 #include "Common/precompiled.h"
@@ -90,6 +91,7 @@ namespace Libretro::Cemu
 		// 5. Initialize Audio & Input
 		Libretro::InitializeAudio();
 		Libretro::InitializeInput();
+		Libretro::InitializeSoftwareKeyboard();
 
 		// 6. Initialize Cafe System
 		CafeSystem::Initialize();
@@ -159,6 +161,7 @@ namespace Libretro::Cemu
 	{
 		LogInfo("Unloading game and shutting down CafeSystem.");
 		CafeSystem::Shutdown();
+		Libretro::ShutdownSoftwareKeyboard();
 		Libretro::ShutdownAudio();
 		if (g_renderer)
 		{
@@ -169,6 +172,7 @@ namespace Libretro::Cemu
 
 	void RunFrame()
 	{
+		Libretro::PollSoftwareKeyboard();
 		// Poll at the start so Cafe's async VPAD reads see fresh state immediately,
 		// then again after audio drain so presses that arrived mid-frame (common when
 		// heavy 3D titles keep the frontend busy) still land before we return.

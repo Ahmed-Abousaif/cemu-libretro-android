@@ -583,6 +583,31 @@ void swkbd_inputStringChanged()
 	}
 }
 
+std::u16string swkbd::getInputText()
+{
+	std::u16string text;
+	if (!swkbdInternalState) return text;
+	for (sint32 i = 0; i < swkbdInternalState->formStringLength; ++i)
+		text.push_back((char16_t)swkbdInternalState->formStringBuffer[i]);
+	return text;
+}
+
+void swkbd::setInputText(const std::u16string& text)
+{
+	if (!hasKeyboardInputHook()) return;
+	sint32 limit = swkbdInternalState->maxTextLength;
+	if (swkbdInternalState->keyboardOnlyMode)
+		limit = swkbdInternalState->keyboardArg.receiverArg.stringBufSize - 1;
+	limit = std::clamp(limit, 0, SWKBD_FORM_STRING_MAX_LENGTH - 1);
+	size_t length = std::min(text.size(), (size_t)limit);
+	if (length && text[length - 1] >= 0xd800 && text[length - 1] <= 0xdbff) --length;
+	for (size_t i = 0; i < length; ++i)
+		swkbdInternalState->formStringBuffer[i] = text[i];
+	swkbdInternalState->formStringLength = (sint32)length;
+	swkbdInternalState->formStringBuffer[length] = L'\0';
+	swkbd_inputStringChanged();
+}
+
 void swkbd::keyInput(uint32 keyCode)
 {
 	if (keyCode == BACKSPACE_KEYCODE || keyCode == BACKWARDS_DELETE_KEYCODE)

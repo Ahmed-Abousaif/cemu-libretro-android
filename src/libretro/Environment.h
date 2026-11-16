@@ -34,6 +34,7 @@ namespace Libretro
 
 	ScreenViewMode GetScreenViewMode();
 	void SetScreenViewMode(ScreenViewMode mode);
+	bool IsDualScreenStacked();
 
 	void InitCoreOptions();
 	void UpdateCoreOptions();

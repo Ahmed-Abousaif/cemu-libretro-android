@@ -825,11 +825,6 @@ void VulkanRenderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture* s
 // it is guaranteed that the texture is not in use and all associated resources (descriptor sets, framebuffers) can be destroyed safely
 void VulkanRenderer::surfaceCopy_notifyTextureRelease(LatteTextureVk* hostTexture)
 {
-	if (m_lastTVTexture.texture == hostTexture)
-		m_lastTVTexture.texture = nullptr;
-	if (m_lastPadTexture.texture == hostTexture)
-		m_lastPadTexture.texture = nullptr;
-
 	for (auto& itr : m_copySurfacePipelineCache)
 	{
 		auto& pipelineInfo = itr.second;

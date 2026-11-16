@@ -27,6 +27,7 @@
 #include "Cafe/TitleList/GameInfo.h"
 #include "libretro/LibretroVulkan.h"
 #include "libretro/Environment.h"
+#include "libretro/ScreenLayout.h"
 
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
@@ -3436,6 +3437,8 @@ void VulkanRenderer::DestroyLibretroOutputImage(LibretroOutputImage& output)
 void VulkanRenderer::DestroyLibretroOutputs()
 {
 	m_libretroPendingIndex = -1;
+	DestroyLibretroOutputImage(m_libretroTVScanout);
+	DestroyLibretroOutputImage(m_libretroPadScanout);
 	for (auto& output : m_libretroOutputs)
 	{
 		DestroyLibretroOutputImage(output);
@@ -3459,6 +3462,11 @@ bool VulkanRenderer::EnsureLibretroOutput(uint32 index, uint32 width, uint32 hei
 		if (vkCreateSemaphore(m_logicalDevice, &semInfo, nullptr, &output.semaphore) != VK_SUCCESS)
 			return false;
 	}
+	return EnsureLibretroImage(output, width, height);
+}
+
+bool VulkanRenderer::EnsureLibretroImage(LibretroOutputImage& output, uint32 width, uint32 height)
+{
 	if (output.image != VK_NULL_HANDLE && output.width == width && output.height == height)
 		return output.view != VK_NULL_HANDLE;
 
@@ -3474,7 +3482,7 @@ bool VulkanRenderer::EnsureLibretroOutput(uint32 index, uint32 width, uint32 hei
 	imageInfo.arrayLayers = 1;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &output.image) != VK_SUCCESS)
@@ -3523,51 +3531,77 @@ bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk, bool isPa
 	if (srcWidth <= 0 || srcHeight <= 0)
 		return false;
 
-	// Cache latest texture info for seamless instant switching
-	if (!isPad)
-	{
-		m_lastTVTexture.texture = baseImageTex;
-		m_lastTVTexture.layer = (uint32)texViewVk->firstSlice;
-		m_lastTVTexture.width = srcWidth;
-		m_lastTVTexture.height = srcHeight;
-	}
-	else
-	{
-		m_lastPadTexture.texture = baseImageTex;
-		m_lastPadTexture.layer = (uint32)texViewVk->firstSlice;
-		m_lastPadTexture.width = srcWidth;
-		m_lastPadTexture.height = srcHeight;
-	}
-
-	Libretro::ScreenViewMode mode = Libretro::GetScreenViewMode();
-
-	// In TV mode, if Pad arrives and we already have TV, skip redundant blit
-	if (mode == Libretro::ScreenViewMode::TV && isPad && m_lastTVTexture.texture)
-		return true;
-
 	draw_endRenderPass();
 
-	static uint32 s_lastTVHeight = 720;
-	if (m_lastTVTexture.height > 0)
-		s_lastTVHeight = (uint32)m_lastTVTexture.height;
+	// Snapshot at scan-buffer copy time, before the game can reuse this render
+	// target for the other screen. Keeping a LatteTextureVk pointer is insufficient
+	// even when TV and DRC use different sizes or are submitted in reverse order.
+	auto& scanout = isPad ? m_libretroPadScanout : m_libretroTVScanout;
+	if (scanout.image != VK_NULL_HANDLE &&
+		(scanout.width != (uint32)srcWidth || scanout.height != (uint32)srcHeight))
+	{
+		// Unlike frontend output slots, scanouts have no frontend sync-index wait.
+		// Finish all uses before replacing an image after a resolution change.
+		Flush(true);
+	}
+	if (!EnsureLibretroImage(scanout, (uint32)srcWidth, (uint32)srcHeight))
+		return false;
+
+	VkImageSubresourceRange scanoutRange{};
+	scanoutRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	scanoutRange.levelCount = 1;
+	scanoutRange.layerCount = 1;
+	barrier_image<TRANSFER_READ, TRANSFER_WRITE>(scanout.image, scanoutRange, scanout.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+	VkImageSubresourceLayers sourceLayers{};
+	sourceLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	sourceLayers.baseArrayLayer = (uint32)texViewVk->firstSlice;
+	sourceLayers.layerCount = 1;
+	VkImageSubresourceRange sourceRange = scanoutRange;
+	sourceRange.baseArrayLayer = sourceLayers.baseArrayLayer;
+	const VkImageLayout oldSourceLayout = baseImageTex->GetImageLayout(sourceRange);
+	baseImageTex->GetImageObj()->flagForCurrentCommandBuffer();
+	barrier_image<IMAGE_READ | IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(baseImageTex, sourceLayers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+	VkImageBlit scanoutCopy{};
+	scanoutCopy.srcSubresource = sourceLayers;
+	scanoutCopy.srcOffsets[1] = {srcWidth, srcHeight, 1};
+	scanoutCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	scanoutCopy.dstSubresource.layerCount = 1;
+	scanoutCopy.dstOffsets[1] = {srcWidth, srcHeight, 1};
+	vkCmdBlitImage(m_state.currentCommandBuffer,
+		baseImageTex->GetImageObj()->m_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		scanout.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &scanoutCopy, VK_FILTER_NEAREST);
+	barrier_image<TRANSFER_READ, IMAGE_READ | IMAGE_WRITE>(baseImageTex, sourceLayers, oldSourceLayout);
+	barrier_image<TRANSFER_WRITE, TRANSFER_READ>(scanout.image, scanoutRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	scanout.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+	const Libretro::ScreenViewMode mode = Libretro::GetScreenViewMode();
+	// Still capture DRC while displaying TV, so switching views uses saved pixels.
+	if (mode == Libretro::ScreenViewMode::TV && isPad && m_libretroTVScanout.image != VK_NULL_HANDLE)
+		return true;
+
+	const uint32 tvHeight = m_libretroTVScanout.height > 0 ? m_libretroTVScanout.height : 720;
+	const bool stacked = Libretro::IsDualScreenStacked();
+	const auto dualLayout = Libretro::ComputeDualScreenLayout(tvHeight, stacked);
 
 	uint32 outWidth = 1280;
 	uint32 outHeight = 720;
 
 	if (mode == Libretro::ScreenViewMode::SideBySide)
 	{
-		outHeight = (s_lastTVHeight > 0) ? s_lastTVHeight : 720;
-		outWidth = outHeight * 32 / 9;
+		outHeight = dualLayout.height;
+		outWidth = dualLayout.width;
 	}
 	else if (mode == Libretro::ScreenViewMode::Pad)
 	{
-		outHeight = (s_lastTVHeight > 0) ? s_lastTVHeight : 720;
+		outHeight = tvHeight;
 		outWidth = outHeight * 16 / 9;
 	}
 	else // TV
 	{
-		outWidth = (m_lastTVTexture.width > 0) ? (uint32)m_lastTVTexture.width : 1280;
-		outHeight = (m_lastTVTexture.height > 0) ? (uint32)m_lastTVTexture.height : 720;
+		outWidth = m_libretroTVScanout.width > 0 ? m_libretroTVScanout.width : 1280;
+		outHeight = tvHeight;
 	}
 
 	uint32 index = 0;
@@ -3589,90 +3623,58 @@ bool VulkanRenderer::BlitLibretroOutput(LatteTextureViewVk* texViewVk, bool isPa
 	dstRange.levelCount = 1;
 	dstRange.baseArrayLayer = 0;
 	dstRange.layerCount = 1;
-	barrier_image<TRANSFER_READ, TRANSFER_WRITE>(output.image, dstRange, output.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	barrier_image<IMAGE_READ | TRANSFER_READ, TRANSFER_WRITE>(output.image, dstRange, output.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	auto blitSingle = [&](LatteTextureVk* tex, uint32 layer, int w, int h, int dstX0, int dstX1, int dstY0, int dstY1) {
-		if (!tex || !tex->GetImageObj()) return;
-		tex->GetImageObj()->flagForCurrentCommandBuffer();
-
-		VkImageSubresourceLayers layers{};
-		layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		layers.mipLevel = 0;
-		layers.baseArrayLayer = layer;
-		layers.layerCount = 1;
-
-		VkImageSubresourceRange srcRange{};
-		srcRange.aspectMask = layers.aspectMask;
-		srcRange.baseMipLevel = 0;
-		srcRange.levelCount = 1;
-		srcRange.baseArrayLayer = layer;
-		srcRange.layerCount = 1;
-		const VkImageLayout oldLayout = tex->GetImageLayout(srcRange);
-		barrier_image<IMAGE_READ | IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(tex, layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
+	auto blitSingle = [&](const LibretroOutputImage& source, const Libretro::ScreenRect& destination) {
+		if (source.image == VK_NULL_HANDLE) return;
 		VkImageBlit region{};
-		region.srcSubresource = layers;
+		region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.srcSubresource.layerCount = 1;
 		region.srcOffsets[0] = {0, 0, 0};
-		region.srcOffsets[1] = {w, h, 1};
+		region.srcOffsets[1] = {(int)source.width, (int)source.height, 1};
 
 		region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		region.dstSubresource.mipLevel = 0;
 		region.dstSubresource.baseArrayLayer = 0;
 		region.dstSubresource.layerCount = 1;
-		region.dstOffsets[0] = {dstX0, dstY0, 0};
-		region.dstOffsets[1] = {dstX1, dstY1, 1};
+		region.dstOffsets[0] = {(int)destination.x, (int)destination.y, 0};
+		region.dstOffsets[1] = {(int)(destination.x + destination.width), (int)(destination.y + destination.height), 1};
 
 		vkCmdBlitImage(
 			m_state.currentCommandBuffer,
-			tex->GetImageObj()->m_image,
+			source.image,
 			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			output.image,
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1,
 			&region,
 			VK_FILTER_LINEAR);
-
-		barrier_image<TRANSFER_READ, IMAGE_READ | IMAGE_WRITE>(tex, layers, oldLayout);
 	};
+
+	// Missing screens must stay black, including after a display-mode change.
+	const bool missingTV = m_libretroTVScanout.image == VK_NULL_HANDLE;
+	const bool missingPad = m_libretroPadScanout.image == VK_NULL_HANDLE;
+	if ((mode == Libretro::ScreenViewMode::SideBySide && (stacked || missingTV || missingPad)) ||
+		(mode == Libretro::ScreenViewMode::Pad && missingPad) ||
+		(mode == Libretro::ScreenViewMode::TV && missingTV))
+	{
+		VkClearColorValue black{};
+		vkCmdClearColorImage(m_state.currentCommandBuffer, output.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &dstRange);
+		barrier_image<TRANSFER_WRITE, TRANSFER_WRITE>(output.image, dstRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	}
 
 	if (mode == Libretro::ScreenViewMode::SideBySide)
 	{
-		if (!m_lastTVTexture.texture || !m_lastPadTexture.texture)
-		{
-			VkClearColorValue black{};
-			vkCmdClearColorImage(m_state.currentCommandBuffer, output.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &dstRange);
-		}
-
-		int midX = (int)(outWidth / 2);
-		// Left: TV
-		if (!isPad)
-			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, midX, 0, (int)outHeight);
-		else if (m_lastTVTexture.texture)
-			blitSingle(m_lastTVTexture.texture, m_lastTVTexture.layer, m_lastTVTexture.width, m_lastTVTexture.height, 0, midX, 0, (int)outHeight);
-
-		// Right: GamePad
-		if (isPad)
-			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, midX, (int)outWidth, 0, (int)outHeight);
-		else if (m_lastPadTexture.texture)
-			blitSingle(m_lastPadTexture.texture, m_lastPadTexture.layer, m_lastPadTexture.width, m_lastPadTexture.height, midX, (int)outWidth, 0, (int)outHeight);
+		blitSingle(m_libretroTVScanout, dualLayout.tv);
+		blitSingle(m_libretroPadScanout, dualLayout.pad);
 	}
 	else if (mode == Libretro::ScreenViewMode::Pad)
 	{
-		if (isPad)
-			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
-		else if (m_lastPadTexture.texture)
-			blitSingle(m_lastPadTexture.texture, m_lastPadTexture.layer, m_lastPadTexture.width, m_lastPadTexture.height, 0, (int)outWidth, 0, (int)outHeight);
-		else
-			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
+		blitSingle(m_libretroPadScanout, {0, 0, outWidth, outHeight});
 	}
 	else // TV
 	{
-		if (!isPad)
-			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
-		else if (m_lastTVTexture.texture)
-			blitSingle(m_lastTVTexture.texture, m_lastTVTexture.layer, m_lastTVTexture.width, m_lastTVTexture.height, 0, (int)outWidth, 0, (int)outHeight);
-		else
-			blitSingle(baseImageTex, (uint32)texViewVk->firstSlice, srcWidth, srcHeight, 0, (int)outWidth, 0, (int)outHeight);
+		blitSingle(m_libretroTVScanout, {0, 0, outWidth, outHeight});
 	}
 
 	barrier_image<TRANSFER_WRITE, IMAGE_READ>(output.image, dstRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

@@ -679,17 +679,12 @@ private:
 	int m_libretroPendingIndex = -1;
 	void DestroyLibretroOutputImage(LibretroOutputImage& output);
 	void DestroyLibretroOutputs();
+	bool EnsureLibretroImage(LibretroOutputImage& output, uint32 width, uint32 height);
 	bool EnsureLibretroOutput(uint32 index, uint32 width, uint32 height);
 	bool BlitLibretroOutput(LatteTextureViewVk* texView, bool isPad);
-	struct CachedLibretroTexture
-	{
-		LatteTextureVk* texture = nullptr;
-		uint32 layer = 0;
-		int width = 0;
-		int height = 0;
-	};
-	CachedLibretroTexture m_lastTVTexture{};
-	CachedLibretroTexture m_lastPadTexture{};
+	// Own the scanout pixels: games may render TV and DRC using the same texture.
+	LibretroOutputImage m_libretroTVScanout{};
+	LibretroOutputImage m_libretroPadScanout{};
 
 	// if VK_EXT_external_memory_host is supported we can (optionally) import all of the Wii U memory into a Vulkan memory object
 	// this allows us to skip any vertex/uniform caching logic and let the GPU directly read the memory from main RAM

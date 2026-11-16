@@ -7,6 +7,8 @@ add_library(cemu_libretro SHARED
     LibretroAudio.h
     LibretroInput.cpp
     LibretroInput.h
+    LibretroKeyboard.cpp
+    LibretroKeyboard.h
     LibretroVulkan.cpp
     LibretroVulkan.h
     Main.cpp
